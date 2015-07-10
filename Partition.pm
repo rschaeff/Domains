@@ -65,13 +65,14 @@ our @EXPORT = (
 		'&peptide_collate',
 		'&load_partition_vars',
 		'$DOMAIN_PREFIX',
+		'$DOMAIN_DATA_DIR',
 		'$GAP_TOL',
 		);
 
 
 
 #These shouldn't be defined in a package
-my $DEBUG = 1;
+my $DEBUG = 0;
 my $FORCE_OVERWRITE = 0;
 my $FORCE_HH_OVERWRITE = 0;
 
@@ -132,6 +133,7 @@ if (!-d $status_dir) {
 sub load_partition_vars { 
 	$DOMAIN_PREFIX = 'domains_v13';
 	$GAP_TOL = 20;
+	$DOMAIN_DATA_DIR;
 }
 
 sub struct_search_dali_query_gen { 
@@ -316,9 +318,6 @@ sub immediate_dali {
 	my $name2 = $1;
 	my $mixup = $name1 . "_" . $name2;
 
-	if ($ENV{LD_LIBRARY_PATH} !~ /\/usr1\/local\/lib/) { 
-		$ENV{LD_LIBRARY_PATH} .= ':/usr1/local/lib';
-	}
 	my $curdir = getcwd();
 	mkdir("$dali_dir/$mixup");
 	chdir("$dali_dir/$mixup");
@@ -832,7 +831,9 @@ sub run_process_v2 {
 		xml_write($domain_summary_doc, $domain_summary_file_name);
 		return $domain_summary_file_name;
 }
-
+sub hasDomains {
+	$_[0]->exists('.//domain');
+}
 sub domain_merge_v2 { 
 		my $sub = 'domain_merge_v2';
 
@@ -1495,7 +1496,8 @@ sub domain_mode_process_v2 {
 				$peptide_filter_nodes = $job_node->findnodes("peptide_filter[\@ver='$vers[0]']");
 				my $peptide_filter_node;
 				if ($peptide_filter_nodes->size() > 1) { 
-					die "ERROR! multiple same version peptide filter nodes in $job_inx, $run_list_dir, weird...\n";
+					warn "WARNING! multiple same version peptide filter nodes in $job_inx, $run_list_dir, weird...\n";
+					$peptide_filter_node = $peptide_filter_nodes->get_node(1);
 				}else{
 					$peptide_filter_node = $peptide_filter_nodes->get_node(1);
 				}
@@ -1977,7 +1979,8 @@ sub register_repair {
 	my $run_list_label = "run_list.repair.$current_version";
 
 	my $abs_run_list_file = File::Spec->rel2abs($run_list_file);
-	my $domain_prefix = 'domains_v12'; #Fix this
+	#my $domain_prefix = 'domains_v12'; #Fix this
+	my $domain_prefix = $DOMAIN_PREFIX; #Fix this
 	my $reference 	= $current_version;
 	my $mode	= 'merge';
 
@@ -2002,7 +2005,8 @@ sub register_repair {
 	foreach my $run_list ($ecod_master_repair_xml->findnodes('//run_list')) { 
 		my $old_run_list_label = $run_list->findvalue('run_list_label');
 		if ($old_run_list_label eq $run_list_label) { 
-			die "ERROR! $run_list_label already in master repair lst\n";
+			warn "WARNING! $run_list_label already in master repair lst\n";
+			return 0;
 		}
 		$run_list->setAttribute('process', 'false');
 		$i++
@@ -2070,19 +2074,19 @@ sub buildali_hhblits {
 		my $job_fn = "$job_dump_dir/$pdb_chain/hh_blits.$pdb_chain.job";
 		my @jobs;
 		
-		my $hh_lib = "export HHLIB=$HH_LIB\n";
-		push (@jobs, $hh_lib);
 
 		if (-f $fa_file && (! -f $new_a3m || $FORCE_HH_OVERWRITE)) { 
-			my $hhblits_command = "$HHBLITS_EXE -i $fa_file -oa3m $new_a3m -addss -psipred $PSIPRED_EXE -psipred_data $PSIPRED_DATA -d $NR20_TMP_DB -cpu 8 ";
+			my $hh_lib = "export HHLIB=$HH_LIB\n";
+			push (@jobs, $hh_lib);
+			my $hhblits_command = "$HHBLITS_EXE -i $fa_file -oa3m $new_a3m -ohhm $new_hhm -addss -psipred $PSIPRED_EXE -psipred_data $PSIPRED_DATA -d $NR20_TMP_DB -cpu 8 ";
 			print "$hhblits_command\n";
 			push (@jobs, $hhblits_command);
 		}
 
-		if (! -f $new_hhm ) { 
-			my $hhmake_command = "$HHMAKE_EXE -i $new_a3m";
-			push (@jobs, $hhmake_command);
-		}
+#		if (! -f $new_hhm ) { 
+#			my $hhmake_command = "$HHMAKE_EXE -i $new_a3m";
+#			push (@jobs, $hhmake_command);
+#		}
 
 		if (scalar(@jobs) > 0) { 
 			job_create($job_fn, \@jobs, 1);
@@ -2235,14 +2239,14 @@ sub hh_run {
 		my $hh_lib = "export HHLIB=$HH_LIB\n";
 		push (@jobs, $hh_lib);
 
-		if (!-f $hhm_fn || $FORCE_HH_OVERWRITE) { 
-			if ($DEBUG) { 
-				print "HHmake $a3m_fn\n";
-			}
-			
-			my $hhmake_command =  "$HHMAKE_EXE -i $a3m_fn";
-			push (@jobs, $hhmake_command);
-		}
+#		if (!-f $hhm_fn || $FORCE_HH_OVERWRITE) { 
+#			if ($DEBUG) { 
+#				print "HHmake $a3m_fn\n";
+#			}
+#			
+#			my $hhmake_command =  "$HHMAKE_EXE -i $a3m_fn";
+#			push (@jobs, $hhmake_command);
+#		}
 
 		#my $result_fn = "$pdb_chain.$reference.result";	
 		my $result_fn = "$ecod_dir/$pdb_chain.$reference.rebuild.result";	
@@ -2482,7 +2486,7 @@ sub peptide_collate {
 		my $path = "$job_dump_dir/$pc/$pc.peptide.v$FILTER_VERSION.xml";
 		if (-f $path) { 
 			my $peptide_xml_doc = xml_open($path);
-			if ($peptide_xml_doc->exists('//peptide_filter')) { 
+			if ($peptide_xml_doc->exists('//peptide_filter' && !$job_node->exists('peptide_filter'))) { 
 				$job_node->appendChild($peptide_xml_doc->findnodes('//peptide_filter')->get_node(1));
 			}
 		}
@@ -2934,7 +2938,7 @@ sub job_list_maintain {
 		print "DEBUG blastp: $new_week\n";
 	}
 	print "BLAST $job_list_xml_fn $reps_only\n";
-	my $blast_job_ids = blastp_job_file($job_list_xml_fn, $reps_only);
+	my $blast_job_ids = blastp_job_file($job_list_xml_fn, $reps_only, $force_overwrite);
 
 	while(qstat_wait_list($blast_job_ids)) { 
 		print "SLEEPING...\n";
@@ -4541,6 +4545,7 @@ sub domain_partition {
 
 	#Changed query sequence to be ungapped (i.e. may contain small unstructured regions, extremely important that GAP_TOL is the same for query generation as domain partition).
 	my $query_ungapped_struct_range_str 	= ungap_range($query_struct_range_str, $$global_opt{gap_tol});
+	my @gapped_query_struct_seqid = @$query_struct_seqid_aref; #Need to retain this for dali_fillin (query pdbs are not ungapped)
 	$query_struct_seqid_aref 		= range_expand($query_ungapped_struct_range_str);
 
 	if (!$query_struct_range_str) { 
@@ -4707,7 +4712,8 @@ sub domain_partition {
 		$ref_chain_domains,		#3
 		$ref_domain_uid_lookup,		#4
 		$ref_range_cache,		#5
-		$query_struct_seqid_aref,	#6	
+		#$query_struct_seqid_aref,	#6	
+		\@gapped_query_struct_seqid,
 		$query_seqid_aref,		#7
 		$query_pdbnum_aref,		#8
 		$query_asym_id,	
@@ -4726,7 +4732,8 @@ sub domain_partition {
 			$ref_chain_domains,
 			$ref_domain_uid_lookup,
 			$ref_range_cache,
-			$query_struct_seqid_aref,
+			#$query_struct_seqid_aref,
+			\@gapped_query_struct_seqid,
 			$query_pdbnum_aref,
 			$query_asym_id,
 			\@used_seq,
@@ -4739,7 +4746,16 @@ sub domain_partition {
 	}
 	
 	if (@coils) { 
-		define_coils($domain_xml_doc, \@coils);
+		define_coils(
+			$domain_xml_doc, 
+			\@coils,
+			\@unused_seq,
+			\@used_seq,
+			$global_opt,
+			$query_pdb,
+			$query_chain,
+			$query_pdbnum_aref
+			);
 	}
 
 	my $final_coverage 		= region_coverage($query_struct_seqid_aref, \@used_seq);
@@ -4839,6 +4855,7 @@ sub define_coils {
 	my $sub = 'define_coils';
 	my ($domain_xml_doc, $coil_aref, $unused_seq_aref, $used_seq_aref, $global_opt, $query_pdb, $query_chain, $query_pdbnum_aref) = @_;
 
+	print "DEBUG: COILS top\n";
 	my $coil_list_node = $domain_xml_doc->createElement('coil_list');
 	my $domain_doc_node = $domain_xml_doc->findnodes('//chain_domains_set_top')->get_node(1);
 	$domain_doc_node->appendChild($coil_list_node);
@@ -4948,8 +4965,8 @@ sub find_hhsearch_domains {
 				next;
 			}
 
-			if ($hit_node->findvalue('@hit_cover') < $$global_opt{hit_coverage}) { 
-				print "Skipping $hit_num $hit_domain_id $$global_opt{hit_coverage}\n";
+			if ($hit_node->findvalue('@hit_cover') < $$global_opt{hit_coverage_threshold}) { #what
+				print "Skipping $hit_num $hit_domain_id $$global_opt{hit_coverage_threshold}\n";
 				next;
 			}
 
@@ -5444,10 +5461,6 @@ sub find_domainwise_blast_domains {
 			$evalue = $evalues;
 		}
 
-		#This SHOUUULD be seqid_range
-		#my $hit_query_seqid_range = $hit_node->findvalue('text()');
-		#It's not anymore...
-		#my $hit_query_reg	= $hit_node->findvalue('text()');
 		my $hit_query_reg	= $hit_node->findvalue('query_reg');
 		if (!$query_struct_seqid_aref) { die "bad qssa\n";}
 		my $hit_query_struct_seqid_aref;
@@ -5558,7 +5571,6 @@ sub find_domainwise_blast_domains {
 				my $sc_query_coverage_1 = region_coverage($sc_query_reg_aref, $ungapped_seqid_range_aref);
 				my $sc_query_coverage_2 = region_coverage($ungapped_seqid_range_aref, $sc_query_reg_aref,);
 				my $sc_hit_coverage_1 = region_coverage($sc_hit_reg_aref, $unused_seq_aref);
-				#my $sc_hit_coverage_2 = region_coverage(\@unused_seq, $sc_hit_reg_aref);
 				
 				if ($DEBUG) { 
 					print "DEBUG blastp SC $i $self_comp_aligner qr $self_comp_query_reg hr $self_comp_hit_reg sqc1 $sc_query_coverage_1 sqc2 $sc_query_coverage_2 shc1 $sc_hit_coverage_1\n";
@@ -5691,7 +5703,6 @@ sub find_chainwise_blast_domains  {
 		if ($hsp_count == 1) { 
 			$evalue = $evalues;
 		}
-
 		my $query_reg		= $hit_node->findvalue('query_reg');
 		#ARG 1 is pos-based, ARG2 is seqid_based, OUTPUT is segid
 		my $hit_query_struct_seqid_aref;
@@ -5730,9 +5741,13 @@ sub find_chainwise_blast_domains  {
 
 			if (!$hit_seqid_aref) { next } 
 			print "GT: $GAP_TOL gt: $$global_opt{gap_tol}\n";
-			ungap_range_aref(@$hit_struct_seqid_aref, $GAP_TOL);
+			#ungap_range_aref(@$hit_struct_seqid_aref, $GAP_TOL); #This wasn't working!?
+			my $test = rangify(@$hit_struct_seqid_aref);
+			$test = ungap_range($test, $$global_opt{gap_tol});
+			$hit_struct_seqid_aref = range_expand($test);
 
-			print "DEFINE chblastp: $sub: $hit_pdb $hit_chain $query_struct_seqid_range\n";
+
+			print "DEFINE chblastp: $sub: $hit_pdb $hit_chain $query_struct_seqid_range $test\n";
 
 			#Calculate hit->query seqid map;
 			my @hit_segs = split(",", $hit_reg);
@@ -5816,10 +5831,12 @@ sub find_chainwise_blast_domains  {
 				my $domain_id	= "e". lc( $query_pdb) . "$query_chain$domain_count";
 				$domain_node->setAttribute('domain_id', $domain_id);
 
-				my $method_node	= $domain_xml_doc->createElement('method');
-				my $method	= 'chblastp';
-				$method_node->appendTextNode($method);
-				$domain_node->appendChild($method_node);
+#				my $method_node	= $domain_xml_doc->createElement('method');
+#				my $method	= 'chblastp';
+#				$method_node->appendTextNode($method);
+#				$domain_node->appendChild($method_node);
+#
+				$domain_node->appendTextChild('method', 'chblastp');
 
 				#REPLACE WITH HIT DOMAIN DERIVED RANGE
 				my @ref_segs = split(/,/, $ref_seqid_range);
@@ -5842,7 +5859,7 @@ sub find_chainwise_blast_domains  {
 								push (@query_struct_seqid_range, $hit_map{$ref_seqid});
 								push (@query_struct_chain_range, $hit_chain_map{$ref_seqid});
 							}else{
-								#print "WARNING! No map for $ref_seqid\n";
+								print "WARNING! No map for $ref_seqid\n";
 								$warning++;
 							}
 							push (@hit_struct_seqid_range, $ref_seqid);
@@ -5854,6 +5871,13 @@ sub find_chainwise_blast_domains  {
 				if ($warning) { 
 					print "WARNING! $warning maps failed\n";
 				}
+				#Prevent very short chblastp domains (does not solve fragment problem, just too short domain problem)
+				if (scalar @query_struct_seqid_range < $$global_opt{gap_tol}) { 
+					print "WARNING! Short chblastp domain, skipping...\n";
+					next HIT_DOMAIN;
+				}
+				print "DEBUG: scalar qssr: " . scalar(@query_struct_seqid_range) . "\n";
+
 				my $struct_seqid_range_node	= $domain_xml_doc->createElement('struct_seqid_range');
 				#$struct_seqid_range_node->appendTextNode($query_struct_seqid_range);	
 				if (scalar(@query_struct_seqid_range) == 0) { 
@@ -6108,8 +6132,8 @@ sub find_dali_fillin_domains {
 		my $dali_fn 	= $hits[$i]{dali_fn};
 
 		my $hit_ecod_domain_id = $hits[$i]{ecod_domain_id};
-		my $hit_uid	= $hits[$i]{uid};
-		my $hit_pdb	= $$ref_range_cache{$hit_uid}{pdb};
+		my $hit_uid		= $hits[$i]{uid};
+		my $hit_pdb		= $$ref_range_cache{$hit_uid}{pdb};
 		my $hit_chain	= $$ref_range_cache{$hit_uid}{chain};
 
 		my $hit_range	= $$ref_range_cache{$hit_uid}{seqid_range};
@@ -6130,16 +6154,16 @@ sub find_dali_fillin_domains {
 
 		my $hit_coverage = $hits[$i]{coverage};
 
-		my $query_domain_seqid_aref 	= struct_region( range_expand($query_reg), $query_struct_seqid_aref);
+		my $query_domain_seqid_aref 	= struct_region(range_expand($query_reg), $query_struct_seqid_aref);
 		my $query_domain_seqid_range 	= ungap_range(rangify(@$query_domain_seqid_aref), $$global_opt{gap_tol});
-		my $query_domain_pdb_range 	= ungap_range(pdb_rangify($query_domain_seqid_aref, $query_pdbnum_aref), $$global_opt{gap_tol});
+		my $query_domain_pdb_range 		= ungap_range(pdb_rangify($query_domain_seqid_aref, $query_pdbnum_aref), $$global_opt{gap_tol});
 
 		my $query_new_coverage 	= region_coverage($query_domain_seqid_aref, $unused_seq_aref);
 		my $query_used_coverage	= region_coverage($query_domain_seqid_aref, $used_seq_aref);
 
 		printf "$sub: %.2f %.2f %.2f\n", $query_new_coverage, $query_used_coverage, $hit_coverage;
 
-		if ( 	($query_new_coverage > $$global_opt{new_coverage_threshold} &&
+		if (($query_new_coverage > $$global_opt{new_coverage_threshold} &&
 			$query_used_coverage < $$global_opt{old_coverage_threshold} && 
 			$hit_coverage > $$global_opt{hit_coverage_threshold}) 
 			||
@@ -6147,7 +6171,7 @@ sub find_dali_fillin_domains {
 			$query_used_coverage < $$global_opt{old_coverage_threshold} && 
 			$dali_z > $$global_opt{frag_z_cutoff}) )  { 
 
-			print "define!\n";
+			print "define! $hit_reg $query_reg\n";
 
 			my $fragment_defined = $hit_coverage <= $$global_opt{hit_coverage_threshold} ? 1 : 0 ;
 	
@@ -6175,7 +6199,6 @@ sub find_dali_fillin_domains {
 			my $domain_id	= "e" . lc($query_pdb) . "$query_chain$domain_count";
 			$domain_node->setAttribute('domain_id', $domain_id);
 
-			
 			my $method_node	= $domain_xml_doc->createElement('method');
 			my $method 	= 'dali_fillin';
 			$method_node->appendTextNode($method);
@@ -6212,6 +6235,7 @@ sub find_dali_fillin_domains {
 
 			my $hit_domain_node	= $domain_xml_doc->createElement('hit_domain');
 			$hit_domain_node->setAttribute('ecod_domain_id', $hit_ecod_domain_id);
+			$hit_domain_node->setAttribute('uid', $hit_uid);
 			$hit_domain_node->setAttribute('reference', $reference);
 			$domain_node->appendChild($hit_domain_node);
 

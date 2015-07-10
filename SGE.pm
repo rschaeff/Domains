@@ -15,6 +15,7 @@ our @EXPORT = (
 		"&qstat_wait_list", 
 		"&qstat_wait",
 		"&throttled_qsub",
+		"&jobify_and_qsub",
 		);
 
 
@@ -94,6 +95,7 @@ sub job_create {
 		print OUT "#\$ -j y \n";
 		print OUT "#\$ -S /bin/bash\n";
 		print OUT "#\$ -M dustin.schaeffer\@gmail.com\n";
+		print OUT "#\$ -v LD_LIBRARY_PATH\n"; #Temporary fix for bdom DALI fillin
 
 	if (ref $lns eq 'ARRAY') { 
 		foreach my $ln (@$lns) { 
@@ -104,6 +106,35 @@ sub job_create {
 	}
 	close OUT;
 }
+
+sub jobify_and_qsub { 
+	my ($cmd_aref, $job_name, $cmds_per_job) = @_;
+
+	printf "#%i\n", scalar(@$cmd_aref);
+	my @jobs;
+	OUTER:
+	for (my $i = 0; $i < scalar(@$cmd_aref) / $cmds_per_job; $i++) { 
+		my @sub_cmds;
+		my $start = $i * $cmds_per_job;
+		for (my $j = $start; $j < $start + $cmds_per_job; $j++) { 
+			last unless defined $$cmd_aref[$j];
+			push (@sub_cmds, $$cmd_aref[$j]);	
+		}
+		my $sub_job_name = "$job_name.$i.job";
+		job_create("$job_name.$i.job", \@sub_cmds);
+
+		push (@jobs, $sub_job_name);
+	}
+	my @job_ids;
+	foreach my $job (@jobs) { 
+		push(@job_ids, qsub($job));
+	}
+	while(qstat_wait_list(\@job_ids)) { 
+		sleep(30);
+	}
+}
+
+
 sub qstat_wait { 
 
 	my $sub = 'qstat_wait';

@@ -170,6 +170,7 @@ sub dali_summ {
 				$matrix[4][4]	= 3;
 			}
 			if ($ln =~ /-ranges/) { 
+				#These are pdb residue numbers, not pos inx
 				my $ref_start 	= substr($ln, 25, 4);
 				$ref_start 	=~ s/\s+//g;
 				my $ref_end	= substr($ln, 31, 4);
@@ -182,6 +183,7 @@ sub dali_summ {
 
 				$ref_range	= "$ref_start-$ref_end";
 				$mob_range	= "$mob_start-$mob_end";
+				#AH HA - query_reg is already in seq_id reference.
 				my $ref_range_aref = struct_region(range_expand($ref_range), $$query_href{struct_seqid_aref});
 				my $mob_range_aref = struct_region(range_expand($mob_range), $hit_struct_seqid_aref);
 

@@ -27,6 +27,7 @@ our @EXPORT = (	"&multi_chain_pdb_range_expand",
 		"&scopify_range",
 		"&scop_range_split",
 		"&multi_chain_region_coverage",
+		"&multi_chain_region_coverage2",
 		"&region_coverage",
 		"&multi_chain_residue_coverage",
 		"&residue_coverage",
@@ -745,10 +746,11 @@ sub multi_chain_range_include {
 		$sort_array[$i]{seqid}	= $$range2_aref[$i];
 	}
 
-	@sort_array = sort {    my $anum = $a->{seqid}; my $bnum = $b->{seqid}; 
-				my $achain = $a->{chain}; my $bchain = $b->{chain};
-				$$sort_href{$achain}{$anum} <=> $$sort_href{$bchain}{$bnum} 
-				} @sort_array;
+	@sort_array = sort {    
+						my $anum = $a->{seqid}; my $bnum = $b->{seqid}; 
+						my $achain = $a->{chain}; my $bchain = $b->{chain};
+						$$sort_href{$achain}{$anum} <=> $$sort_href{$bchain}{$bnum};
+						} @sort_array;
 
 	undef ($range2_aref);
 	undef ($chain2_aref);
@@ -976,7 +978,6 @@ sub multi_chain_region_coverage {
 	if (scalar(@$range1_aref) != scalar(@$chain1_aref)) { croak "ERROR! $sub: range 1/chain 1 array not same size\n" } 
 	if (scalar(@$range2_aref) != scalar(@$chain2_aref)) { croak "ERROR! $sub: range 2/chain 2 array not same size\n" } 
 
-
 	my %isect;
 	my %union;
 	for (my $i = 0; $i < scalar(@$range1_aref); $i++) { 
@@ -989,7 +990,7 @@ sub multi_chain_region_coverage {
 	for (my $i = 0; $i < scalar(@$range2_aref); $i++) { 
 		my $pos2 = $$range2_aref[$i];
 		my $chain2 = $$chain2_aref[$i];
-		if (!$pos2 || !defined($chain2)) { #0 truth
+		if (!defined($pos2) || !defined($chain2)) { #0 truth
 			print "WARNING! $sub: pos chain mismatch for $i $pos2 $chain2\n";
 			return 0;
 		} 
@@ -1006,6 +1007,55 @@ sub multi_chain_region_coverage {
 		}
 		my $res_coverage = scalar(@isect) / $length1;
 		return $res_coverage;
+	}else{
+		print "WARNING! $sub: lengt1 == 0?\n";
+		return 0;
+	}
+	
+}
+sub multi_chain_region_coverage2 { 
+	my $sub = 'multi_chain_region_coverage2';
+	my ($range1_aref, $chain1_aref, $range2_aref, $chain2_aref) = @_;
+	my $length1 = scalar(@$range1_aref);
+	my $length2 = scalar(@$range2_aref);
+
+	if ($DEBUG) { 
+		printf "DEBUG top: $sub %i %i %i %i\n", scalar(@$range1_aref), scalar(@$chain1_aref), scalar(@$range2_aref), scalar(@$chain2_aref);
+	}
+
+	if (scalar(@$range1_aref) != scalar(@$chain1_aref)) { croak "ERROR! $sub: range 1/chain 1 array not same size\n" } 
+	if (scalar(@$range2_aref) != scalar(@$chain2_aref)) { croak "ERROR! $sub: range 2/chain 2 array not same size\n" } 
+
+	my %isect;
+	my %union;
+	for (my $i = 0; $i < scalar(@$range1_aref); $i++) { 
+		my $pos1 = $$range1_aref[$i];
+		my $chain1 = $$chain1_aref[$i];
+		my $comp_key = $pos1 . ":" . $chain1;
+
+		$union{$comp_key} = 1;
+	}
+	for (my $i = 0; $i < scalar(@$range2_aref); $i++) { 
+		my $pos2 = $$range2_aref[$i];
+		my $chain2 = $$chain2_aref[$i];
+		if (!defined($pos2) || !defined($chain2)) { #0 truth
+			print "WARNING! $sub: pos chain mismatch for $i $pos2 $chain2\n";
+			return 0;
+		} 
+
+
+		my $comp_key = $pos2 .":". $chain2;
+		if ($union{$comp_key}) { $isect{$comp_key} = 1 } 
+		$union{$comp_key} = 1;
+	}
+	my @isect = sort {$a cmp $b} keys %isect;
+	if ($length1 > 0) { 
+		if ($DEBUG ) { 
+			printf "DEBUG: $sub %i %i %2.f\n", scalar(@isect), $length1, scalar(@isect)/$length1;
+		}
+		my $res_coverage1 = scalar(@isect) / $length1;
+		my $res_coverage2 = scalar(@isect) / $length2;
+		return ($res_coverage1, $res_coverage2);
 	}else{
 		print "WARNING! $sub: lengt1 == 0?\n";
 		return 0;
@@ -1202,7 +1252,7 @@ sub ungap_range {
 			if ($segs[$i+1] =~ /(\-?\d+)\-(\-?\d+)/) { 
 				my $start2 = $1;
 				my $end2 = $2;
-				if (abs($solo1 - $end2) < $GAP_TOL) { 
+				if (abs($solo1 - $start2) < $GAP_TOL) { 
 					splice(@segs, $i, 2, "$solo1-$end2");
 				}else{
 					$i++;
