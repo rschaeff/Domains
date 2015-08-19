@@ -366,7 +366,6 @@ sub dali_summ {
 		my $mob_range = $hits[$i]{mob_range};
 		my $ref_range = $hits[$i]{ref_range};
 
-
 		my $dali_file = $hits[$i]{dali_fn};
 		my $ecod_domain_id = $hits[$i]{ecod_domain_id};
 		my $coverage = $hits[$i]{coverage};
@@ -390,6 +389,7 @@ sub dali_summ {
 		$dali_hit_node->setAttribute('coverage', $coverage);
 		$dali_hit_node->setAttribute('blosum_norm_dali_score', $blsm_norm);
 
+		#This should be seqid range if your reference pdb set is seqid indexed
 		my $dali_query_range_node	= $dali_summ_xml_doc->createElement('query_reg');
 		#$dali_query_range_node->appendTextNode($mob_range);
 		$dali_query_range_node->appendTextNode($ref_range);

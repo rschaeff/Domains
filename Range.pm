@@ -701,6 +701,7 @@ sub range_expand {
 			my $end = $2;
 			for (my $i = $start; $i < $end + 1; $i ++) { 
 				if (!$seen{$i}) { 
+					$i += 0; #This is gross 
 					push (@range, $i);
 				}
 				$seen{$i}++;

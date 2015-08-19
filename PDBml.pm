@@ -1716,6 +1716,7 @@ sub pdbml_annot_parse {
 	}
 
 	my $pdbml = pdbml_load($pdb4);
+	(!$pdbml && return 0);
 	#struct
 	my %struct;
 	my $structCategoryXPath = '//PDBx:structCategory/PDBx:struct';

@@ -72,7 +72,7 @@ our @EXPORT = (
 
 
 #These shouldn't be defined in a package
-my $DEBUG = 0;
+my $DEBUG = 1;
 my $FORCE_OVERWRITE = 0;
 my $FORCE_HH_OVERWRITE = 0;
 
@@ -139,11 +139,14 @@ sub load_partition_vars {
 sub struct_search_dali_query_gen { 
 	my $sub = 'struct_search_dali_query_gen';
 
-	my ($job_list_xml_fn) = @_;
+	my ($job_list_xml_fn, $ref) = @_;
 	load_references();
-	my $ecod_xml_doc 	= xml_open($REF_XML{$LATEST_REFERENCE});
+	if (!$ref) {
+		$ref = $LATEST_REFERENCE;
+	}
+	my $ecod_xml_doc 	= xml_open($REF_XML{$ref});
 	my $job_xml_doc 	= xml_open($job_list_xml_fn);
-	my $reference 		= $LATEST_REFERENCE;
+	my $reference 		= $ref;
 
 #rep find 
 	my $rep_domains = $ecod_xml_doc->findnodes(qq{//domain[\@manual_rep='true']});
@@ -191,7 +194,7 @@ sub struct_search_dali_query_gen {
 		my $reference	= $job_node->findvalue('reference');
 		my ($pdb, $chain) = get_pdb_chain($job_node);
 
-		if ($reference ne $LATEST_REFERENCE) { 
+		if ($reference ne $ref) { 
 			print "WARNING! job reference $reference does not match input refreences $LATEST_REFERENCE\n";
 		}
 		my $mode	= $job_node->findvalue('mode');
@@ -2476,26 +2479,33 @@ sub peptide_collate {
 	my $sub = 'peptide_collate';
 	my ($job_list_xml_fn) = @_;
 
+	print "peptide collate\n";
 	my $job_xml_doc 			= xml_open($job_list_xml_fn);
 	my ($job_dump_dir, $job_list_dir) 	= get_job_dirs_from_job_xml($job_xml_doc);
-
+	
+	print "1\n";
 	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
-		my ($query_pdb, $query_chain) = split '_', job_node_pdb_chain($job_node);		 
-		my $pc = $query_pdb . "_" . $query_chain;
+		print "1a $job_node\n";
+		my $pc = job_node_pdb_chain($job_node);		 
+		#my ($query_pdb, $query_chain) = job_node_pdb_chain($job_node);		 
+		#my $pc = $query_pdb . "_" . $query_chain;
 		
 		my $path = "$job_dump_dir/$pc/$pc.peptide.v$FILTER_VERSION.xml";
 		if (-f $path) { 
+			print "$path\n";
 			my $peptide_xml_doc = xml_open($path);
-			if ($peptide_xml_doc->exists('//peptide_filter' && !$job_node->exists('peptide_filter'))) { 
+			if ($peptide_xml_doc->exists('//peptide_filter') && !$job_node->exists('peptide_filter')) { 
 				$job_node->appendChild($peptide_xml_doc->findnodes('//peptide_filter')->get_node(1));
 			}
 		}
 	}
+	print "2\n";
 	my $out_fn = "$job_list_xml_fn.peptide";
 	xml_write($job_xml_doc, $out_fn);
 	if (-f $out_fn) { 
 		move($out_fn, $job_list_xml_fn);
 	}	
+	print "3\n";
 }
 
 
@@ -2781,6 +2791,7 @@ sub job_list_maintain {
 	load_references();
 	load_partition_vars();
 
+	print "#Build FASTA\n";
 	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
 
 		my ($query_pdb, $query_chain) = get_pdb_chain($job_node);	
@@ -2794,7 +2805,7 @@ sub job_list_maintain {
 			}
 		}
 		my $fasta_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.fa";
-
+	
 		if (-f $fasta_fn && $force_overwrite < 2) { 
 			print "WARNING! $fasta_fn exists, skipping...\n";
 			next;
@@ -5023,7 +5034,7 @@ sub find_hhsearch_domains {
 				}
 			}
 
-			if ($query_coverage > $$global_opt{new_coverage_threshold} && $query_used_coverage < 10 && $hh_prob > 90 && scalar(@$hit_query_struct_seqid_aref) > $$global_opt{gap_tol}) { 
+			if ($query_coverage > $$global_opt{new_coverage_threshold} && $query_used_coverage < $$global_opt{gap_tol} && $hh_prob > 90 && scalar(@$hit_query_struct_seqid_aref) > $$global_opt{gap_tol}) { 
 
 				print "DEFINE hhsearch: $sub: $hit_domain_id $hit_query_struct_seqid\n";
 
