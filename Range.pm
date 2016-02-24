@@ -267,7 +267,7 @@ sub pdb_rangify {
 	if ($DEBUG) { 
 		print "DEBUG $sub: seqid_aref $seqid_aref, $pdbnum_aref\n";
 	}
-
+	
 	my $seqid_range_str = rangify(@$seqid_aref);
 	if ($DEBUG ) { 
 		print "DEBUG $sub: seqid range str $seqid_range_str\n";

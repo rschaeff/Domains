@@ -1319,7 +1319,6 @@ sub pdbml_fasta_fetch {
 
 	my ( $pdb4, $asym_id, $chain, $seqid_aref ) = @_;
 
-
 	if ($DEBUG) { 
 		print "DEBUG $sub: $pdb4 $asym_id $chain " . scalar(@$seqid_aref) . "\n";
 	}
@@ -1344,9 +1343,12 @@ sub pdbml_fasta_fetch {
 		my $entity_poly_nodes	= $pdbml->findnodes($entity_poly_XPath);
 		foreach my $node ($entity_poly_nodes->get_nodelist() ) { 
 			my $chain_str = $node->findvalue('PDBx:pdbx_strand_id');
-			if ($chain_str =~ /$chain/) { 
-				$entity_id = $node->findvalue('@entity_id');
-				last;
+			my @chains = split(/,/, $chain_str);
+			foreach my $i_chain (@chains) { 
+				if ($i_chain eq $chain) { 
+					$entity_id = $node->findvalue('@entity_id');
+					last;
+				}
 			}
 		}
 	}else{
@@ -1876,9 +1878,9 @@ sub pdbml_annot_parse {
 		my $pdbx_mutation = $node->findvalue("PDBx:pdbx_mutation");
 		my $pdbx_fragment = $node->findvalue("PDBx:pdbx_fragment");
 		my $pdbx_number_of_molecules = $node->findvalue("PDBx:pdbx_number_of_molecules");
-		my $src_method = $node->findvalue("PDBx:src_method");
-		my $type = $node->findvalue("PDBx:type");
-		#print "\t$entity_id\t$pdbx_description\t$pdbx_mutation\t$pdbx_number_of_molecules\t$src_method\t$type\n";
+		my $src_method 	= $node->findvalue("PDBx:src_method");
+		my $type 		= $node->findvalue("PDBx:type");
+
 		$entity{$entity_id}{pdbx_description} = $pdbx_description;
 		$entity{$entity_id}{pdbx_mutation}	= $pdbx_mutation;
 		$entity{$entity_id}{pdbx_fragment}	= $pdbx_fragment;
@@ -1963,11 +1965,22 @@ sub pdbml_annot_parse {
 			#}
 		}
 		my $length = length($pdbx_seq_can);
-		#print "\t$entity_id\t$type\t$pdbx_strand_id\t$length\n";
+		#print "\t$entity_id\t$type\t$pdbx_strand_id\t$length\t$chain\n";
 		$entity{$entity_id}{type} = $type;
 		$entity{$entity_id}{pdbx_strand_id} = $pdbx_strand_id;
-		if ($pdbx_strand_id =~ /$chain/) { 
-			$target_entity_id = $entity_id;
+		$pdbx_strand_id =~ s/\s+//;
+		
+		if ($pdbx_strand_id =~ /\,/) { 
+			my @strands = split(/\,/, $pdbx_strand_id);
+			foreach my $strand (@strands) { 
+				if ($strand eq $chain) { 
+					$target_entity_id = $entity_id;
+				}
+			}
+		}else{
+			if ($pdbx_strand_id eq $chain) { 
+				$target_entity_id = $entity_id;
+			}
 		}
 	}
 
@@ -2158,6 +2171,45 @@ sub pdbml_asym_annotate_parse {
 	return(\@helices, \@sheets, \@disulf, \@struct_site_gen);
 }
 
+sub pdbml_date_method { 
+
+	my $sub = 'pdbml_date_method';
+	my ($pdb_id) = @_;
+	$pdb_id = lc($pdb_id);
+	my $pdbml = pdbml_load($pdb_id);
+
+	#exptl
+	my %exptl;
+	my $exptlCategoryXPath = '//PDBx:exptlCategory/PDBx:exptl';
+	my $exptl_nodes = $pdbml->findnodes($exptlCategoryXPath);
+	my ($entry_id, $method);
+	foreach my $node ($exptl_nodes->get_nodelist()) { 
+		$entry_id = $node->findvalue('@entry_id');
+		$method = $node->findvalue('@method');
+		$exptl{$entry_id}{method} = $method;
+	}
+
+	#deposition date (mod = 0)  
+	my $date;
+	my %database_PDB_rev;
+	my $database_PDB_revCategory_XPath = '//PDBx:database_PDB_revCategory/PDBx:database_PDB_rev[@num="1"]';
+	if ($pdbml->exists($database_PDB_revCategory_XPath)) { 
+
+		my $rev_node = $pdbml->findnodes($database_PDB_revCategory_XPath)->get_node(1);
+	#	if ($rev_node->exists('PDBx:date_original')) { 
+	#		$date = $rev_node->findvalue('PDBx:date_original');
+	#	}elsif($rev_node->exists('PDBx:date')) { 
+			$date = $rev_node->findvalue('PDBx:date');
+	#	}else{
+	#		die "$pdb_id?";
+	#	}
+	}
+	my $uc_pdb_id = uc($pdb_id);
+	#print "$pdb_id $exptl{$uc_pdb_id}{method} $date\n";
+
+	return ($date, $exptl{$uc_pdb_id}{method});
+
+}
 1;
 
 

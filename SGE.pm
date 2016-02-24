@@ -34,7 +34,7 @@ sub qsub {
 	#	die "ERROR! $sub: $job_file not found\n";
 	#}
 
-	my $output = `qsub -terse $job_file`; #Use -terse for better parsing.
+	my $output = `qsub -terse -pe orte 8 $job_file`; #Use -terse for better parsing.
 
 	my $job_id;
 	if ($output =~ /(\d+)/) { 
@@ -60,7 +60,7 @@ sub throttled_qsub {
 	JOB:
 	while ($i <= scalar(@$job_aref)) { 
 
-		$wc = `qstat | wc`;
+		$wc = `qstat -u \\* | wc`;
 		@lines = split(/\n/, `qstat`);
 		$wc = scalar(@lines);
 		if ($wc < $limit) { 
@@ -162,7 +162,7 @@ sub qstat_wait_list {
 	}
 
 	my %not_complete;
-	my $string = `qstat`;
+	my $string = `qstat -u \\*`; #Ahh
 	my @lines = split(/\n/, $string);
 	
 	foreach my $line (@lines) { 

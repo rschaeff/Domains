@@ -55,6 +55,8 @@ our @EXPORT = (
 		'&hh_run',
 		'&hh_parse',
 		'&register_repair',
+		'&reference_library_load',
+		'&read_self_comps',
 		'&struct_search_dali_query_gen',
 		'&generate_query_pdb',
 		'&bsumm',
@@ -64,6 +66,7 @@ our @EXPORT = (
 		'&peptide_filter',
 		'&peptide_collate',
 		'&load_partition_vars',
+		'&find_hh_dali_domains',
 		'$DOMAIN_PREFIX',
 		'$DOMAIN_DATA_DIR',
 		'$GAP_TOL',
@@ -129,7 +132,6 @@ if (!-d $status_dir) {
 	die "ERROR! status directory $status_dir not found\n";
 }
 
-
 sub load_partition_vars { 
 	$DOMAIN_PREFIX = 'domains_v13';
 	$GAP_TOL = 20;
@@ -148,12 +150,11 @@ sub struct_search_dali_query_gen {
 	my $job_xml_doc 	= xml_open($job_list_xml_fn);
 	my $reference 		= $ref;
 
-#rep find 
+	#rep find 
 	my $rep_domains = $ecod_xml_doc->findnodes(qq{//domain[\@manual_rep='true']});
 	if ($DEBUG) { 
 		printf "DEBUG: Found %i rep domain in ref $reference\n", $rep_domains->size();
 	}
-	#my $pdb_junk_bin = '/home/rschaeff_1/pdb_junk_bin';
 
 	my @ecod_reps;
 	my %uid_lookup;
@@ -195,7 +196,7 @@ sub struct_search_dali_query_gen {
 		my ($pdb, $chain) = get_pdb_chain($job_node);
 
 		if ($reference ne $ref) { 
-			print "WARNING! job reference $reference does not match input refreences $LATEST_REFERENCE\n";
+			print "WARNING! job reference $reference does not match input refrences $LATEST_REFERENCE\n";
 		}
 		my $mode	= $job_node->findvalue('mode');
 
@@ -267,17 +268,16 @@ sub jobify_dali {
 	
 	my ($dali_dir, $pdb1_fn, $pdb2_fn, $dali_output_fn) = @_;
 
-	#my $DALI_EXE = '/home/rschaeff/bin/DaliLite_nohtml';
 	if (!-f $DALI_EXE) { 
 		die "ERROR! $sub: DALI exe $DALI_EXE not found\n";
 	}
 	my $job_file = $dali_output_fn;
 	$job_file =~ s/dali/job/;
 
-	$pdb1_fn =~ /\/([\w\_\-]+)\.pdb/;
+	$pdb1_fn =~ /\/([\d\w\_\-\.]+)\.pdb/;
 	my $name1 = $1;
 
-	$pdb2_fn =~ /\/([\w\.]+)\.pdb/;
+	$pdb2_fn =~ /\/([\d\w\.]+)\.pdb/;
 	my $name2 = $1;
 	my $mixup = $name1 . "_" . $name2;
 
@@ -287,7 +287,6 @@ sub jobify_dali {
 	print $fh "#\$ -cwd \n";
 	print $fh "#\$ -j y\n";
 	print $fh "#\$ -M dustin.schaeffer\@gmail.com\n";
-	#print $fh "export LD_LIBRARY_PATH=/usr1/local/lib\n";
 	print $fh "#\$ -v LD_LIBRARY_PATH\n";
 	print $fh "mkdir $dali_dir/$mixup\n"; 
 	print $fh "cd $dali_dir/$mixup\n";
@@ -453,19 +452,17 @@ sub job_list_assess {
 		die "ERROR! $sub: generate file $generate_file not found\n";
 	}
 
-
 	my $assess_xml_doc 	= xml_open("$run_list_dir/$assess_file");
 	my $generate_xml_doc 	= xml_open("$run_list_dir/$generate_file");
 
 	#process assess jobs
-
 	my %known;
 	foreach my $as_node (find_job_nodes($generate_xml_doc)) { 
 		my $job_id 	= $as_node->findvalue('@id');
 
 		my ($query_pdb, $query_chain) = get_pdb_chain($as_node);
 		my $reference 	= $as_node->findvalue('reference');
-		my $mode	= $as_node->findvalue('mode');
+		my $mode		= $as_node->findvalue('mode');
 
 		$known{$query_pdb}{$query_chain}{$reference}{$mode}++;
 	}
@@ -1111,9 +1108,6 @@ sub domain_merge_v2 {
 		
 }
 			
-
-
-
 
 sub reference_library_load { 
 	my $sub = 'reference_library_load';
@@ -1982,6 +1976,7 @@ sub register_repair {
 	my $run_list_label = "run_list.repair.$current_version";
 
 	my $abs_run_list_file = File::Spec->rel2abs($run_list_file);
+	load_partition_vars();
 	#my $domain_prefix = 'domains_v12'; #Fix this
 	my $domain_prefix = $DOMAIN_PREFIX; #Fix this
 	my $reference 	= $current_version;
@@ -2189,20 +2184,16 @@ sub hh_run {
 	my @job_ids;
 	foreach my $node ($job_nodes->get_nodelist() ) { 
 
-		if ($reps && $use_reps &&  $node->findvalue('@rep95') ne 'true') { next } 
-		#if ($node->findvalue('@poor') ne 'true'){ next } 
+		if ($reps && $use_reps && $node->findvalue('@rep95') ne 'true') { next } 
 
 		my $query_pdb	= $node->findvalue('query_pdb');
-		#$query_pdb	= lc($query_pdb);
 		my $query_chain	= $node->findvalue('query_chain');
 		my $pdb_chain = "${query_pdb}_${query_chain}";
-		#my $hora_id	= $node->findvalue('@hora_id');
 
 		my $input = 'struct_seqid';
 		if ($node->exists('mode/@input')) { 
 			$input 	= $node->findvalue('mode/@input');
 		}
-
 
 		my $recurse = 0;
 		my $recurse_range;
@@ -2216,14 +2207,11 @@ sub hh_run {
 
 		my $query_reference = $node->findvalue('reference');
 		
-		#my $hh_sum_xml_doc_fn = "$pdb_chain.$reference.hh_summ.xml";
-
 		if ($query_reference ne $reference) { 
 			print "WARNING! query reference $query_reference does not match input reference $reference\n";
 			next;
 		}
 
-		#my $hora_dir = "$hora_job_dump_dir/$hora_id";
 		my $ecod_dir = "$job_dump_dir/$pdb_chain";
 
 		#my $a3m_fn = "$pdb_chain.a3m";
@@ -2233,7 +2221,6 @@ sub hh_run {
 			next;
 		}
 
-
 		my $hhm_fn = $a3m_fn;
 		$hhm_fn =~ s/a3m/hhm/;
 
@@ -2241,7 +2228,7 @@ sub hh_run {
 		my @jobs;
 		my $hh_lib = "export HHLIB=$HH_LIB\n";
 		push (@jobs, $hh_lib);
-
+ 
 #		if (!-f $hhm_fn || $FORCE_HH_OVERWRITE) { 
 #			if ($DEBUG) { 
 #				print "HHmake $a3m_fn\n";
@@ -2483,29 +2470,24 @@ sub peptide_collate {
 	my $job_xml_doc 			= xml_open($job_list_xml_fn);
 	my ($job_dump_dir, $job_list_dir) 	= get_job_dirs_from_job_xml($job_xml_doc);
 	
-	print "1\n";
 	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
-		print "1a $job_node\n";
 		my $pc = job_node_pdb_chain($job_node);		 
 		#my ($query_pdb, $query_chain) = job_node_pdb_chain($job_node);		 
 		#my $pc = $query_pdb . "_" . $query_chain;
 		
 		my $path = "$job_dump_dir/$pc/$pc.peptide.v$FILTER_VERSION.xml";
 		if (-f $path) { 
-			print "$path\n";
 			my $peptide_xml_doc = xml_open($path);
 			if ($peptide_xml_doc->exists('//peptide_filter') && !$job_node->exists('peptide_filter')) { 
 				$job_node->appendChild($peptide_xml_doc->findnodes('//peptide_filter')->get_node(1));
 			}
 		}
 	}
-	print "2\n";
 	my $out_fn = "$job_list_xml_fn.peptide";
 	xml_write($job_xml_doc, $out_fn);
 	if (-f $out_fn) { 
 		move($out_fn, $job_list_xml_fn);
 	}	
-	print "3\n";
 }
 
 
@@ -2774,8 +2756,6 @@ sub blastp_job_file {
 		}
 	}
 
-
-
 	return (\@job_ids);
 }
 sub job_list_maintain { 
@@ -2879,7 +2859,7 @@ sub job_list_maintain {
 	my $ali_job_ids = buildali_hhblits($job_list_xml_fn);
 
 	while (qstat_wait_list($ali_job_ids)) { 
-		print "SLEEEPING...\n";
+		print "SLEEPING...\n";
 		sleep(30); #5 min job checks;
 	}
 
@@ -3215,9 +3195,10 @@ sub build_rep_stats {
 	}
 }
 sub run_list_maintain { 
+	my $sub = 'run_list_maintain';
 	my ($run_list_xml_fn, $run_label, $run_dir, $reference, $start_date_ctime) = @_;;
 	my $run_list_xml_doc;
-	print "$run_list_xml_fn\n";
+	print "$sub: $run_list_xml_fn\n";
 	if (-f $run_list_xml_fn)  { 
 		$run_list_xml_doc = xml_open($run_list_xml_fn);
 	}else{
@@ -3247,7 +3228,7 @@ sub run_list_maintain {
 	}
 
 	my %obsolete;
-	open (my $fh, "<", $obsolete_file) or die "ERROR! Could not open obsolete file $obsolete_file: $!\n";
+	open (my $fh, "<", $obsolete_file) or die "ERROR! Could not open obsolete manifest file $obsolete_file: $!\n";
 	while (my $ln = <$fh>) { 
 		if (substr($ln, 0, 6) ne 'OBSLTE') { next } 
 		my $obs = substr($ln, 20, 4);
@@ -3496,7 +3477,7 @@ sub run_list_maintain {
 		my $ali_job_ids = buildali_hhblits($job_list_xml_fn);
 
 		while (qstat_wait_list($ali_job_ids)) { 
-			print "SLEEEPING...\n";
+			print "SLEEPING...\n";
 			sleep(300); #5 min job checks;
 		}
 
@@ -3505,24 +3486,27 @@ sub run_list_maintain {
 			print "DEBUG: peptide_prefilter $new_week\n";
 		}
 		#my $peptide_filter_script = '/home/rschaeff/work/domain_partition/ecod_domain_parser/bin/xml_peptide_prefilter.pl';
-		my $peptide_filter_script = '/data/ecod/weekly_updates/weeks/bin/xml_peptide_prefilter.pl';
-		if (!-f $peptide_filter_script) { 
-			die "peptide filter script not found! $peptide_filter_script\n";
-		}
-		open (OUT, ">$run_label.$new_week.pep.job") or die "Could not open $run_label.$new_week.pep.job for writing:$!\n";
-		print OUT "#!/bin/bash\n";
-		print OUT "#\$ -cwd\n";
-		print OUT "#\$ -j y \n";
-		print OUT "#\$ -S /bin/bash\n";
-		print OUT "#\$ -M dustin.schaeffer\@gmail.com\n";
-		print OUT "$peptide_filter_script $job_list_xml_fn\n";
-		close OUT;
+#		my $peptide_filter_script = '/data/ecod/weekly_updates/weeks/bin/xml_peptide_prefilter.pl';
+#		if (!-f $peptide_filter_script) { 
+#			die "peptide filter script not found! $peptide_filter_script\n";
+#		}
+#		open (OUT, ">$run_label.$new_week.pep.job") or die "Could not open $run_label.$new_week.pep.job for writing:$!\n";
+#		print OUT "#!/bin/bash\n";
+#		print OUT "#\$ -cwd\n";
+#		print OUT "#\$ -j y \n";
+#		print OUT "#\$ -S /bin/bash\n";
+#		print OUT "#\$ -M dustin.schaeffer\@gmail.com\n";
+#		print OUT "$peptide_filter_script $job_list_xml_fn\n";
+#		close OUT;
+#
+		my $pep_job_ids = peptide_filter($job_list_xml_fn);
 
-		my $pep_job_id = qsub("$run_label.$new_week.pep.job");
-		while (qstat_wait($pep_job_id)) { 
+		#my $pep_job_id = qsub("$run_label.$new_week.pep.job");
+		while (qstat_wait_list($pep_job_ids)) { 
 			print "SLEEPING peptide!\n";
-			sleep(60);
+			sleep(10);
 		}
+		peptide_collate($job_list_xml_fn);
 
 		#Run self_comp jobs
 		if ($DEBUG) { 
@@ -4524,9 +4508,11 @@ sub domain_partition {
 		return;
 	}
 
+	#Return the seqids and struct seqids of the query pdb_chain
 	my ($query_seqid_aref, $query_struct_seqid_aref, $query_pdbnum_aref, $query_asym_id) = 
 			pdbml_seq_parse($query_pdb, $query_chain);
 
+	#Return annotations for the query pdb_chain
 	my ($struct_href, 
 		$exptl_href, 
 		$entity_href, 
@@ -4538,7 +4524,6 @@ sub domain_partition {
 		$entity_src_gen_href, 
 		$entity_src_syn_href) = pdbml_annot_parse($query_pdb, $query_chain);
 
-	#print "?$$global_opt{hit_coverage}\n";
 	my $pdb_chain = $query_pdb . "_" . $query_chain;
 
 	my $src_method = $$entity_href{$target_entity_id}{src_method};
@@ -4547,16 +4532,18 @@ sub domain_partition {
 		print "WARNING! $sub: $query_pdb not found! skipping...\n";
 		return 0;
 	}
+
 	#if ($recurse) { 
 	#	$query_seqid_aref = isect(range_expand($recurse_range), $query_seqid_aref);
 	#	$query_struct_seqid_aref = isect(range_expand($recurse_range), $query_struct_seqid_aref);
 	#}
+
 	my $query_range_str 		= rangify(@$query_seqid_aref);
 	my $query_struct_range_str 	= rangify(@$query_struct_seqid_aref);
 
 	#Changed query sequence to be ungapped (i.e. may contain small unstructured regions, extremely important that GAP_TOL is the same for query generation as domain partition).
 	my $query_ungapped_struct_range_str 	= ungap_range($query_struct_range_str, $$global_opt{gap_tol});
-	my @gapped_query_struct_seqid = @$query_struct_seqid_aref; #Need to retain this for dali_fillin (query pdbs are not ungapped)
+	my @gapped_query_struct_seqid 	= @$query_struct_seqid_aref; #Need to retain this for dali_fillin (query pdbs are not ungapped)
 	$query_struct_seqid_aref 		= range_expand($query_ungapped_struct_range_str);
 
 	if (!$query_struct_range_str) { 
@@ -4574,7 +4561,9 @@ sub domain_partition {
 	#	my $seqid_range = $recurse_range;
 	#	$seqid_range =~ s/\,/_/g;
 	#	$blast_summ_fn = "$dir/${query_pdb}_${query_chain}_${seqid_range}.$reference.blast_summ.xml";
-	if($concise) { 
+	#}
+
+	if( $concise ) { 
 		$blast_summ_fn = "$dir/$pdb_chain.$reference.blast_summ.concise.xml";
 	}else{
 		$blast_summ_fn = "$dir/$pdb_chain.$reference.blast_summ.xml";
@@ -4588,7 +4577,7 @@ sub domain_partition {
 		}
 	}
 
-	my $domain_count	= 1;
+	my $domain_count	= 1; #Used for generating new domain ids
 
 	my $domain_xml_doc	= XML::LibXML->createDocument;
 	my $domain_doc_node	= $domain_xml_doc->createElement('chain_domains_set_top');
@@ -4606,6 +4595,7 @@ sub domain_partition {
 		$domain_doc_node->setAttribute('known_synthetic', 'true');
 	}
 
+	#Do some work for coil detection
 	my $coils_fn = "$dir/$pdb_chain.coils.xml";
 	my @coils;
 	if (-f $coils_fn) { 
@@ -4613,6 +4603,7 @@ sub domain_partition {
 		my $coils_xml_doc = xml_open($coils_fn);
 		foreach my $coil_node ($coils_xml_doc->findnodes('//coil')) { 
 			my $coil_seqid_range	= $coil_node->findvalue('coil_seqid_range');
+			next unless $coil_seqid_range =~ /\d+/;
 			my $method	= $coil_node->findvalue('@method');
 			my %coil_entry;
 			$coil_entry{method} = $method;	
@@ -4622,16 +4613,18 @@ sub domain_partition {
 		}
 	}
 
-
+	#Build the stub of the domains xml file
 	my $domain_list_node	= $domain_xml_doc->createElement('domain_list');
 	$domain_doc_node->appendChild($domain_list_node);
 
+	#Open the sequence summary search file (i.e. the "blast_summ" file)
 	my $blast_summ_xml_doc = xml_open($blast_summ_fn);
 
-	my $blast_summ_pdb 	= $blast_summ_xml_doc->findvalue('//blast_summ_doc/blast_summ/@pdb');
+	my $blast_summ_pdb 		= $blast_summ_xml_doc->findvalue('//blast_summ_doc/blast_summ/@pdb');
 	my $blast_summ_chain	= $blast_summ_xml_doc->findvalue('//blast_summ_doc/blast_summ/@chain');
 
 	if ($query_pdb ne $blast_summ_pdb || $query_chain ne $blast_summ_chain) { 
+		#I don't think I've seen this error in over 4 years. 08/2015 rds
 		print "ERORR! hora file/blast file pdb mismatch $query_pdb/$blast_summ_pdb $query_chain/$blast_summ_chain\n";
 		die;
 	}
@@ -4654,7 +4647,6 @@ sub domain_partition {
 		$global_opt,
 		$reference,
 		\@coils,
-		
 	);
 
 	#BLAST
@@ -4675,6 +4667,7 @@ sub domain_partition {
 		$reference,
 		\@coils,
 	);
+
 	#PSIBLAST
 	unless ($NO_PSIBLAST) { 
 		find_psiblast_domains (
@@ -4775,6 +4768,10 @@ sub domain_partition {
 	xml_write($domain_xml_doc, $domain_xml_fn);
 
 	return 1;
+}
+
+sub struct_domain_partition { 
+	...
 }
 
 sub read_self_comps { 
@@ -5017,7 +5014,7 @@ sub find_hhsearch_domains {
 			my $unused_coverage = region_coverage($query_seqid_aref, $unused_seq_aref);
 
 			if ($unused_coverage < 0.05 || scalar(@$unused_seq_aref) < 10) { 
-				print "query complete\n";
+				#print "query complete\n";
 				last;
 			}
 			my $query_coverage = region_coverage($hit_query_struct_seqid_aref, $unused_seq_aref);
@@ -5183,6 +5180,168 @@ sub find_hhsearch_domains {
 					print "query_coverage $query_coverage query_used_coverage $query_used_coverage hh_prob $hh_prob scalar " .  scalar(@$hit_query_struct_seqid_aref). "\n";
 				}
 
+			}
+		}
+	}
+}
+sub find_hh_dali_domains { 
+	my $sub = 'find_hh_dali_domains';
+	
+	my ($blast_summ_xml_doc,
+		$dali_summ_xml_doc,
+		$domain_xml_doc,
+		$ref_chain_domains,
+		$ref_range_cache,
+		$ref_domain_uid_lookup,
+		$query_struct_seqid_aref,
+		$query_seqid_aref,
+		$query_pdbnum_aref,
+		$self_comp_aref,
+		$used_seq_aref,
+		$unused_seq_aref,
+		$input_mode,
+		$global_opt,
+		$reference,
+		$coil_aref) = @_;
+
+	my $domain_count = $domain_xml_doc->exists('//domain')
+		? $domain_xml_doc->findnodes('//domain')->size() + 1
+		: 1;
+
+	my $domain_list_node = $domain_xml_doc->findnodes('//domain_list')->get_node(1);		
+
+	my $query_pdb 	= $domain_xml_doc->findvalue('//@pdb_id');
+	my $query_chain = $domain_xml_doc->findvalue('//@chain_id');
+
+	my $dali_i = 0;
+	my %dali_hits;
+	foreach my $dali_hit_node (find_dali_hit_nodes($dali_summ_xml_doc)) { 
+		my ($uid, $hit_ecod_domain_id) 	= get_ids($dali_hit_node);
+		my ($z, $rmsd, $id) 			= get_dali_scores($dali_hit_node);	
+		my ($hit_reg, $query_reg, $coverage) = get_dali_regions($dali_hit_node);
+
+		my %dali_hit;
+		$dali_hit{ecod_domain_id}	= $hit_ecod_domain_id;
+		$dali_hit{query_range}		= $query_reg;
+		$dali_hit{hit_range}		= $hit_reg;
+		$dali_hit{zscore}			= $z;
+		push (@{$dali_hits{$hit_ecod_domain_id}}, \%dali_hit);
+		$dali_i++;
+
+	}
+
+	my $hh_i = 0;
+	my %hh_hits;
+	foreach my $hh_hit_node (find_hhsearch_hit_nodes($blast_summ_xml_doc) ) { 
+		my $hit_num = $hh_hit_node->findvalue('@num');
+
+		my $hit_ecod_domain_id = $hh_hit_node->findvalue('@domain_id');
+
+		my $hh_prob		= $hh_hit_node->findvalue('@hh_prob');
+		my $query_reg	= $hh_hit_node->findvalue('query_reg');
+		my $hit_reg 	= $hh_hit_node->findvalue('hit_reg');
+		my $hit_query_struct_seqid_aref; # i.e. Query residues covered by hit
+		if ($input_mode  eq 'seqid') { 
+			$hit_query_struct_seqid_aref = struct_region(range_expand($query_reg), $query_seqid_aref);
+		}elsif ($input_mode  eq 'struct_seqid') { 
+			$hit_query_struct_seqid_aref = struct_region(range_expand($query_reg), $query_struct_seqid_aref);
+		}
+		next unless ref $hit_query_struct_seqid_aref eq 'ARRAY';
+		my $hit_query_struct_seqid = rangify(@$hit_query_struct_seqid_aref);
+
+		my %hh_hit;
+		$hh_hit{ecod_domain_id} = $hit_ecod_domain_id;
+		$hh_hit{query_range}	= $hit_query_struct_seqid;
+		$hh_hit{hit_range}		= $hit_reg;
+		$hh_hit{hh_prob}		= $hh_prob;
+		push (@{$hh_hits{$hit_ecod_domain_id}}, \%hh_hit);
+		$hh_i++;
+	}
+
+	my %mixed;
+	foreach my $key (keys %hh_hits, keys %dali_hits) { 
+		$mixed{$key}++;
+	}
+
+	foreach my $key (keys %mixed) { 
+		my $hit_ecod_domain_id = $key;
+		foreach my $dali_align (@{$dali_hits{$key}}) { 
+			my $dali_range_aref = range_expand($dali_align->{query_range});
+			foreach my $hh_align (@{$hh_hits{$key}}) { 
+				if ($hh_align->{query_range} eq 'NA') { next } 
+				my $hh_range_aref = range_expand($hh_align->{query_range});
+				if (bidirectional_coverage(range_expand($dali_align->{query_range}), range_expand($hh_align->{query_range}), 0.5)) { 
+					my $mixed_range_aref = union($dali_range_aref, $hh_range_aref); #Not isect?
+					my $mixed_range = rangify(@$mixed_range_aref);
+
+					my $unused_coverage = region_coverage($query_seqid_aref, $unused_seq_aref);
+
+					if ($unused_coverage < 0.05 || scalar(@$unused_seq_aref) < 10) { 
+						print "query complete\n";
+						last;
+					}
+					my $query_coverage		 	= region_coverage($mixed_range_aref, $unused_seq_aref);
+					my $query_used_coverage		= residue_coverage($mixed_range_aref, $used_seq_aref);
+					#print "qc:$query_coverage quc: $query_used_coverage nct:$$global_opt{new_coverage_threshold}\n";
+
+
+					if ($query_coverage > $$global_opt{new_coverage_threshold} && 
+						$query_used_coverage < $$global_opt{gap_tol} && 
+						$dali_align->{zscore} > 4 && 
+						$hh_align->{hh_prob} > 50 &&
+						scalar(@$mixed_range_aref) > $$global_opt{gap_tol}) { 
+						
+						print "DEFINE hh_dali: $sub: $hit_ecod_domain_id\n";
+
+						my $domain_node	= $domain_xml_doc->createElement('domain');
+						my $domain_id = 'e' . lc($query_pdb) . $query_chain . $domain_count;
+						$domain_node->setAttribute('domain_id', $domain_id);
+
+						$domain_node->appendTextChild('method', 'hh_dali');
+
+						$domain_node->appendTextChild('struct_seqid_range', $mixed_range);
+
+						$domain_node->appendTextChild('hit_dali_range', $dali_align->{hit_range});
+						$domain_node->appendTextChild('hit_hh_range', 	$hh_align->{hit_range});
+
+						my $ungapped_seqid_range = ungap_range($mixed_range, $$global_opt{gap_tol});
+						my $ungapped_seqid_range_aref = range_expand($ungapped_seqid_range);
+						my $usr_node = $domain_xml_doc->createElement('ungapped_seqid_range');
+						$usr_node->appendTextNode($ungapped_seqid_range);
+						$usr_node->setAttribute('gap_tolerance', $$global_opt{gap_tol});
+						$domain_node->appendChild($usr_node);
+
+						$domain_node->appendTextChild('pdb_range', pdb_rangify($mixed_range_aref, $query_pdbnum_aref));
+						
+						my $ungapped_pdb_range = pdb_rangify($ungapped_seqid_range_aref, $query_pdbnum_aref);
+						my $ugp_node = $domain_xml_doc->createElement('ungapped_pdb_range');
+						$ugp_node->appendTextNode($ungapped_pdb_range);
+						$ugp_node->setAttribute('gap_tolerance', $$global_opt{gap_tol});
+						$domain_node->appendChild($ugp_node);
+
+						my $hdi_node = $domain_xml_doc->createElement('hit_domain');
+						$hdi_node->setAttribute('ecod_domain_id', $hit_ecod_domain_id);
+						$hdi_node->setAttribute('reference', $reference);
+						$hdi_node->setAttribute('uid', $$ref_domain_uid_lookup{$hit_ecod_domain_id});
+						$domain_node->appendChild($hdi_node);
+
+						my $hh_score_node		= $domain_xml_doc->createElement('hh_score');
+						$hh_score_node->setAttribute('hh_prob', $hh_align->{hh_prob});
+						$domain_node->appendChild($hh_score_node);
+
+						my $dali_score_node 	= $domain_xml_doc->createElement('dali_score');
+						$dali_score_node->setAttribute('z-score', $dali_align->{zscore});
+						$domain_node->appendChild($dali_score_node);
+
+						$domain_list_node->appendChild($domain_node);
+
+						range_exclude($ungapped_seqid_range_aref, $unused_seq_aref);
+						range_include($ungapped_seqid_range_aref, $used_seq_aref);
+
+						$domain_count++;
+	
+					}
+				}
 			}
 		}
 	}
@@ -6283,6 +6442,16 @@ sub range_decompose {
 	return ($hqssa, $hqsca);
 }
 
+sub bidirectional_coverage { 
+	my ($range_aref1, $range_aref2, $c) = @_;
+	if ($range_aref1 eq 'NA' or $range_aref2 eq 'NA') { return 0 } 
+	my $c1 = region_coverage($range_aref1, $range_aref2);
+	my $c2 = region_coverage($range_aref2, $range_aref1);
+	if ($c1 > $c && $c2 > $c) { 
+		return 1;
+	}
+	return 0;
+}
 sub isect { 
 	my $sub = 'isect';
 	my ($aref1, $aref2) = @_;
@@ -6300,4 +6469,20 @@ sub isect {
 	@i = sort { $a <=> $b } @i;
 	return \@i;
 }
+
+sub union { 
+	my $sub = 'unioin';
+	my ($aref1, $aref2) = @_;
+
+	my %s;
+	foreach my $a1 (@$aref1) { 
+		$s{$a1}++;
+	}
+	foreach my $a2 (@$aref2) { 
+		$s{$a2}++;
+	}
+	my @u = sort {$a <=> $b} keys %s;
+	return \@u;
+}
 1;
+
