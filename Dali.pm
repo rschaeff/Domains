@@ -94,11 +94,11 @@ sub dali_summ {
 		}
 
 		my ($hit_pdb, $hit_chain, $hit_uid);
-		if ($dali_file =~ /\/e([0-9]\w{3})(\.)/) { #Go digging in ref for range to get parse
+		if ($dali_file =~ /\.e([0-9]\w{3})(\.)/) { #Go digging in ref for range to get parse
 		#	print "$dali_file\n";
 			#print "WARNING! MC PARSE not implemented go do it.\n";
 			next;
-		}elsif($dali_file =~ /(e([0-9]\w{3})(\w+))\./) {
+		}elsif($dali_file =~ /\.(e([0-9]\w{3})(\w+))\./) {
 			#$hit_pdb = $1;
 			#$hit_chain = $2;
 			$hit_uid = $uid_lookup{$ecod_domain_id};
@@ -106,7 +106,7 @@ sub dali_summ {
 			$hit_uid = $1;
 			$ecod_domain_id = $$rep_stats{$hit_uid}{ecod_domain_id};
 		}else{
-			die "So confused...\n";
+			die "So confused... $dali_file!\n";
 		}
 		$hit_pdb 	= $$rep_stats{$hit_uid}{pdb};
 		$hit_chain 	= $$rep_stats{$hit_uid}{chain};

@@ -202,7 +202,7 @@ sub pdb_range_expand {
 			#next;
 			print "WARNING! $sub: PDB number $start not found, attempting fast forward\n";
 			for (my $i = $start; $i < $end; $i++) { 
-				print "$sub FFORWARD $i\n";
+				#print "$sub FFORWARD $i\n";
 				if ($pdbnum_to_seqid{$i}) { 
 					$start = $i;
 					last;
@@ -217,7 +217,7 @@ sub pdb_range_expand {
 		if (!$pdbnum_to_seqid{$end}) { 
 			print "WARNING! $sub PDB num $end not found, attempting rewind\n";
 			for (my $i = $end; $i > $start; $i--) { 
-				print "$sub REWIND $i\n";
+				#print "$sub REWIND $i\n";
 				if ($pdbnum_to_seqid{$i}) { 
 					$end = $i;
 					last;
@@ -279,21 +279,37 @@ sub pdb_rangify {
 		my $seg			= $1;
 		my $seg_start_seqid	= $2;
 		my $seg_end_seqid	= $3;
-
-		if (defined($$pdbnum_aref[$seg_start_seqid]) && defined($$pdbnum_aref[$seg_end_seqid])) { 
-			if ($DEBUG) { 
-				print "DEBUG $sub: start pdb num $$pdbnum_aref[$seg_start_seqid] end pdb num $$pdbnum_aref[$seg_end_seqid]\n";
-			}
-			push (@pdbnum_range_segs, "$$pdbnum_aref[$seg_start_seqid]-$$pdbnum_aref[$seg_end_seqid]");
-		}else{
-			if (!defined($$pdbnum_aref[$seg_start_seqid]) && defined($$pdbnum_aref[$seg_end_seqid])) { 
-				print "WARNING! $sub: No pdb numbers for seg $seg\n";
-			}elsif(!defined($$pdbnum_aref[$seg_start_seqid])) { 
-				print "WARNING! $sub: No start pdbnum for seg $seg\n";
-			}elsif(!defined($$pdbnum_aref[$seg_end_seqid])) { 
-				print "WARNING! $sub: No end pdbnum for seg $seg\n";
+		
+		if (ref $pdbnum_aref eq 'ARRAY') { 
+			if (defined($$pdbnum_aref[$seg_start_seqid]) && defined($$pdbnum_aref[$seg_end_seqid])) { 
+				if ($DEBUG) { 
+					print "DEBUG $sub: start pdb num $$pdbnum_aref[$seg_start_seqid] end pdb num $$pdbnum_aref[$seg_end_seqid]\n";
+				}
+				push (@pdbnum_range_segs, "$$pdbnum_aref[$seg_start_seqid]-$$pdbnum_aref[$seg_end_seqid]");
 			}else{
-				die "ERROR! $sub: Catastrophic regexp failure on $seqid_range_str\n";
+				if (!defined($$pdbnum_aref[$seg_start_seqid]) && !defined($$pdbnum_aref[$seg_end_seqid])) { 
+					print "WARNING! $sub: No pdb numbers for seg $seg\n";
+				}elsif(!defined($$pdbnum_aref[$seg_start_seqid])) { 
+					print "WARNING! $sub: No start pdbnum for seg $seg\n";
+				}elsif(!defined($$pdbnum_aref[$seg_end_seqid])) { 
+					print "WARNING! $sub: No end pdbnum for seg $seg\n";
+				}else{
+					die "ERROR! $sub: Catastrophic regexp failure on $seqid_range_str\n";
+				}
+			}
+		}elsif(ref $pdbnum_aref eq 'HASH') { 
+			if (defined($$pdbnum_aref{$seg_start_seqid}) && defined($$pdbnum_aref{$seg_end_seqid})) { 
+				push (@pdbnum_range_segs, "$$pdbnum_aref{$seg_start_seqid}-$$pdbnum_aref{$seg_end_seqid}");
+			}else{
+				if (!defined $$pdbnum_aref{$seg_start_seqid} && !defined $$pdbnum_aref{$seg_end_seqid}) { 
+					print "WARNING! $sub: No pdb indices for seg $seg\n";
+				}elsif(!defined $$pdbnum_aref{$seg_start_seqid}) { 
+					print "WARNING! $sub: No pdb start index for seg $seg\n";
+				}elsif(!defined $$pdbnum_aref{$seg_end_seqid}) { 
+					print "WARNING! $sub: No pdb end idex for seg $seg\n";
+				}else{
+					die "ERROR! $sub: Catastrophic regexp failure on $seqid_range_str\n";
+				}
 			}
 		}
 	}
@@ -419,13 +435,13 @@ sub rangify {
 	my $on = 0;
 	
 	if (scalar(@pos) == 0) { 
+		warn "warning! $sub: Empty input array\n";
 		return 0;
-		#die "ERROR! $sub: Empty input array\n";
 	}
 
 	if (scalar(@pos) == 1) { 
+		warn "warning! $sub: Singleton input array\n";
 		return 0;
-		die "ERROR! $sub: Singleton input array\n";
 	}
 
 	while ($i < scalar(@pos)) {
@@ -596,7 +612,7 @@ sub multi_chain_pdb_range_expand {
 			if (!$pdbnum_to_seqid{$chain}{$start}) { 
 				print "WARNING! $sub: PDB number $start not found,  attempting fast forward\n";
 				for (my $i = $start; $i < $end; $i++) { 
-					print "$sub FFORWARD $i\n";
+					#print "$sub FFORWARD $i\n";
 					if ($pdbnum_to_seqid{$chain}{$i}) { 
 						$start = $i;
 						last;
@@ -612,7 +628,7 @@ sub multi_chain_pdb_range_expand {
 				print "WARNING! $sub: PDB number $end not found, attempting rewind\n";
 				
 				for (my $i = $end; $i > $start; $i--) { 
-					print "$sub REWIND $i\n";
+					#print "$sub REWIND $i\n";
 					if ($pdbnum_to_seqid{$chain}{$i}){ 
 						$end = $i;
 						last;
@@ -707,7 +723,7 @@ sub range_expand {
 				$seen{$i}++;
 			}
 		}elsif($seg =~ /\d+/) { 
-			push (@range,$seg);
+			push (@range, $seg);
 		}else{
 			#die "ERROR! $sub: Bad segment regexp: $seg\n";
 			print "WARNING! $sub: Bad segment regexp: $seg $range_str\n";
@@ -765,9 +781,14 @@ sub multi_chain_range_include {
 
 sub range_include { 
 	my ($range1_aref, $range2_aref) = @_;
+	my %seen;
+	foreach my $seqid (@$range2_aref) { 
+		$seen{$seqid}++;
+	}
 	for (my $i = 0; $i < scalar(@$range1_aref); $i++) { 	
-		if (! grep {$_ == $$range1_aref[$i]} @$range2_aref) {
+		if (!$seen{$$range1_aref[$i]}) {
 			push (@$range2_aref, $$range1_aref[$i]);
+			$seen{$$range1_aref[$i]}++;
 		}
 	}
 	@$range2_aref = sort {$a <=> $b} @$range2_aref;

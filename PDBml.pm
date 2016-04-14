@@ -11,6 +11,7 @@ use XML::LibXML::Reader;
 our @ISA = qw(Exporter);
 our @EXPORT = 
 	("&pdbml_annot_parse", 
+	"&pdbml_date_method",
 	 "&pdbml_entity_poly",
 	 "&pdbml_doc_seq_parse",
 	 "&pdbml_fetch_chains",
@@ -2186,7 +2187,7 @@ sub pdbml_date_method {
 	foreach my $node ($exptl_nodes->get_nodelist()) { 
 		$entry_id = $node->findvalue('@entry_id');
 		$method = $node->findvalue('@method');
-		$exptl{$entry_id}{method} = $method;
+		push (@{$exptl{$entry_id}{method}}, $method);
 	}
 
 	#deposition date (mod = 0)  

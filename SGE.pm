@@ -34,7 +34,8 @@ sub qsub {
 	#	die "ERROR! $sub: $job_file not found\n";
 	#}
 
-	my $output = `qsub -terse -pe orte 8 $job_file`; #Use -terse for better parsing.
+	#my $output = `qsub -terse -pe orte 8 $job_file`; #Use -terse for better parsing.
+	my $output = `qsub -terse $job_file`; #Use -terse for better parsing.
 
 	my $job_id;
 	if ($output =~ /(\d+)/) { 
