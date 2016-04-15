@@ -1017,7 +1017,6 @@ sub multi_chain_region_coverage {
 			return 0;
 		} 
 
-
 		my $comp_key = $pos2 .":". $chain2;
 		if ($union{$comp_key}) { $isect{$comp_key} = 1 } 
 		$union{$comp_key} = 1;
@@ -1156,12 +1155,12 @@ sub multi_chain_ungap_range {
 
 	my $i = 0;
 	while ($i < scalar(@segs) -1) { 
-		if ($segs[$i] =~ /(\w):(\-?\d+)\-(\-?\d+)/) { 
+		if ($segs[$i] =~ /(\w+):(\-?\d+)\-(\-?\d+)/) { 
 			my $chain1 	= $1;
 			my $start1	= $2;
 			my $end1 	= $3;
 
-			if ($segs[$i+1] =~ /(\w):(\-?\d+)\-(\-?\d+)/) { 
+			if ($segs[$i+1] =~ /(\w+):(\-?\d+)\-(\-?\d+)/) { 
 				my $chain2 	= $1;
 				my $start2	= $2;
 				my $end2	= $3;
@@ -1172,7 +1171,7 @@ sub multi_chain_ungap_range {
 					$i++;
 				}
 			}
-			elsif($segs[$i+1] =~ /(\w):(\d+)/) { 
+			elsif($segs[$i+1] =~ /(\w+):(\d+)/) { 
 				my $solo_chain2 = $1;
 				my $solo2 = $2;
 				if ($chain1 eq $solo_chain2 && abs($solo2 - $end1) < $GAP_TOL) { 
@@ -1188,10 +1187,10 @@ sub multi_chain_ungap_range {
 				return 0;
 			}
 		}
-		elsif($segs[$i] =~ /(\w):(\d+)/) { 
+		elsif($segs[$i] =~ /(\w+):(\d+)/) { 
 			my $solo_chain1 = $1;
 			my $solo1 = $2;
-			if ($segs[$i+1] =~ /(\w):(\-?\d+)\-(\-?\d+)/) { 
+			if ($segs[$i+1] =~ /(\w+):(\-?\d+)\-(\-?\d+)/) { 
 				my $chain2 = $1;
 				my $start2 = $2;
 				my $end2 = $3;
@@ -1201,7 +1200,7 @@ sub multi_chain_ungap_range {
 					$i++;
 				}
 			}
-			elsif($segs[$i+1] =~ /(\w):(\d+)/) { 
+			elsif($segs[$i+1] =~ /(\w+):(\d+)/) { 
 				my $solo_chain2 = $1;
 				my $solo2 = $2;
 				if ($solo_chain2 eq $solo2 && abs($solo2 - $solo1) < $GAP_TOL) { 
