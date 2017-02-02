@@ -51,6 +51,11 @@ our @EXPORT = (
     '&peptide_collate',               '&load_partition_vars',
     '&find_hh_dali_domains',          '$DOMAIN_PREFIX',
     '$DOMAIN_DATA_DIR',               '$GAP_TOL',
+	'&chain_blast_process',	"&self_comp_process",
+	'&blast_process'	,'&blast_process_v2',
+	'&hhsearch_process', '&hhsearch_process_v2',
+	'&hh_result_parse'
+
 );
 
 #These shouldn't be defined in a package
@@ -70,8 +75,8 @@ my $HH_LIB                   = '/home/rschaeff/hhsuite-2.0.15-linux-x86_64/lib/h
 my $SINGLE_BOUNDARY_OPTIMIZE = '/data/ecod/weekly_updates/weeks/bin/single_boundary_optimize.pl';
 my $SINGLE_PEPTIDE_FILTER    = '/data/ecod/weekly_updates/weeks/bin/single_xml_peptide_prefilter.pl';
 
-#my $NR20_TMP_DB		= '/home/rschaeff_1/side/wtf_hh/nr20_12Aug11';
-my $NR20_TMP_DB = '/local_scratch/rschaeff/nr20_12Aug11';
+my $NR20_TMP_DB		= '/home/rschaeff_1/side/wtf_hh/nr20_12Aug11';
+#my $NR20_TMP_DB = '/local_scratch/rschaeff/nr20_12Aug11';
 my $PDB_CACHE   = '/home/rschaeff_1/pdb_junk_bin';
 
 my $PERFORM_NREP_CONCISE       = 1;
@@ -88,6 +93,9 @@ my $FILTER_VERSION      = 6;             #peptide filter
 my $CC_FILTER_VERSION   = 1;
 my $SCREEN_REPS         = 1;             #Screen for rep95 nodes
 my $SCREEN_MC_DOM       = 1;             #Screen for MC domain components
+
+my $HSP_EVALUE_THRESHOLD = 0.005;
+
 
 our $DOMAIN_PREFIX;
 our $GAP_TOL;
@@ -109,6 +117,1590 @@ my $status_dir = '/usr2/pdb/data/status';
 if ( !-d $status_dir ) {
     die "ERROR! status directory $status_dir not found\n";
 }
+
+sub hh_result_parse { 
+	my $sub = 'hh_result_parse';
+	my ($pdb, $chain_str, $result_fn, $seqid_range_href, $ecod_id_href, $reference, $out, $input, $uid_lookup) = @_;
+
+	open(IN, "<", $result_fn) or die "ERROR! $sub: Could not open $result_fn for reading:$!\n";
+
+	my $hh_xml_doc	= XML::LibXML->createDocument;
+	my $hh_root_node	= $hh_xml_doc->createElement('hh_summ_doc');
+	$hh_xml_doc->setDocumentElement($hh_root_node);
+	
+	my $hh_reference_node	= $hh_xml_doc->createElement('hh_reference');
+	$hh_reference_node->appendTextNode($reference);
+	$hh_root_node->appendChild($hh_reference_node);
+
+	my $hh_hit_list_node	= $hh_xml_doc->createElement('hh_hit_list');
+	$hh_root_node->appendChild($hh_hit_list_node);
+
+	my ($query, $short_query, $match_columns, $matched_seqs, $total_seqs, $neff, $searched_hmms, $date, $command);
+	my ($query_seqid_aref, $query_struct_seqid_aref, $query_pdbnum_aref, $query_asym_id, $query_chain_seqid_aref, $query_chain_struct_seqid_aref);
+	my %template_ends;
+	my @aligned_cols;
+	while (my $ln = <IN>) { 
+		if ($ln =~ /^Query\s+(.*)/) { 
+			$query = $1;
+			$query =~ /((\w{4})\,?)\s?(\w)/;
+			#$short_query = $1;
+			#$pdb = $2;
+			#$chain = uc($3);
+			my @chain = split('_', $chain_str);
+			$query =~ /([\w\,]+)/;
+			$short_query = $1;
+			#($query_seqid_aref, $query_struct_seqid_aref, $query_pdbnum_aref, $query_asym_id) = pdbml_seq_parse($pdb, $chain);
+			($query_seqid_aref, $query_struct_seqid_aref, $query_pdbnum_aref, $query_asym_id, $query_chain_seqid_aref, $query_chain_struct_seqid_aref) = pdbml_mc_seq_parse($pdb, \@chain);
+			printf "%i %i %i %i %s %s\n", scalar @$query_seqid_aref, scalar @$query_struct_seqid_aref, scalar @$query_chain_seqid_aref, scalar @$query_chain_struct_seqid_aref, $query_asym_id, $chain_str;
+
+
+			my $range = multi_chain_rangify($query_struct_seqid_aref, $query_chain_struct_seqid_aref, $GAP_TOL);
+			my $ungapped_range = multi_chain_ungap_range($range, $GAP_TOL);	
+			print "$range\n $ungapped_range\n";
+			($query_struct_seqid_aref, $query_chain_struct_seqid_aref) = multi_chain_range_expand($ungapped_range);
+			
+			if (!$query_seqid_aref) { 
+				print "ERROR! $sub: $pdb not found, skipping...\n";
+				return 0;
+			}
+			#print "Q: $query\n";
+
+			$hh_root_node->appendTextChild('hh_query', $query);
+
+		}elsif($ln =~ /^Match_columns\s+(\d+)/) { 
+			$match_columns = $1;
+			#print "Match_cols: $match_columns\n";
+
+			$hh_root_node->appendTextChild('hh_match_cols', $match_columns);
+
+		}elsif($ln =~ /^No_of_seqs\s+(\d+) out of (\d+)/) { 
+			$matched_seqs = $1;
+			$total_seqs = $2;
+			#print "matched: $matched_seqs total: $total_seqs\n";
+			my $hh_matched_seqs_node = $hh_xml_doc->createElement('hh_match_seqs');
+			$hh_matched_seqs_node->setAttribute('matched', $matched_seqs);
+			$hh_matched_seqs_node->setAttribute('total', $total_seqs);
+
+			$hh_root_node->appendChild($hh_matched_seqs_node);
+
+		}elsif($ln =~ /^Neff\s+([\d\.]+)/) { 
+			$neff = $1;
+			#print "Neff: $neff\n";
+			my $hh_neff_node	= $hh_xml_doc->createElement('hh_neff');
+			$hh_neff_node->appendTextNode($neff);
+			$hh_root_node->appendChild($hh_neff_node);
+		}elsif($ln =~ /^Searched_HMMs\s+(\d+)/) { 
+			$searched_hmms = $1;
+			$hh_root_node->appendTextChild('hh_searched_hhms', $searched_hmms);
+
+		}elsif($ln =~ /^Date\s+(.*)/) { 
+			$date = $1;
+			$hh_root_node->appendTextChild('hh_date', $date);
+
+		}elsif($ln =~ /Command\s+(\/.*)/) { 
+			$command = $1;
+			$hh_root_node->appendTextChild('hh_command', $command);
+		}
+
+		if ($ln =~ /^\s+No\s+Hit\s+Prob/) { 
+			my $hh_hit_summ_list_node = $hh_xml_doc->createElement('hh_hit_summ_list');
+
+			while (my $ln = <IN>) { 
+				unless ($ln =~ /\d+\s+\w{4}/) { last } 
+				$ln =~ s/^\s+//;
+				my @F = split(/\s+/, $ln);
+				my @G = split(/\s+/, substr($ln, 36, 94));
+
+				my $hh_hit_summ_node	= $hh_xml_doc->createElement('hh_hit_summ');
+
+				my $hit_num	= $F[0];
+				$hh_hit_summ_node->setAttribute('hit_num', $hit_num);
+				#my $hit_uaid	= $F[1];
+				#$hh_hit_summ_node->setAttribute('uaid', $hit_uaid);
+
+				my $hit_ecod_domain_id = $F[1];
+				$hh_hit_summ_node->setAttribute('ecod_domain_id', $hit_ecod_domain_id);
+				#my $hh_prob	= $F[2];
+				my $hh_prob	= $G[0];
+				$hh_hit_summ_node->setAttribute('hh_prob', $hh_prob);
+				#my $hh_eval	= $F[3];
+				my $hh_eval	= $G[1];
+				$hh_hit_summ_node->setAttribute('hh_eval', $hh_eval);
+				#my $hh_pval	= $F[4];
+				my $hh_pval	= $G[2];
+				$hh_hit_summ_node->setAttribute('hh_pval', $hh_pval);
+				#my $hh_score	= $F[5];
+				my $hh_score	= $G[3];
+				$hh_hit_summ_node->setAttribute('hh_score', $hh_score);
+				#my $hh_ss	= $F[6];
+				my $hh_ss	= $G[4];
+				$hh_hit_summ_node->setAttribute('hh_ss', $hh_ss);
+				#my $hh_cols	= $F[7];
+				my $hh_cols	= $G[5];
+				$hh_hit_summ_node->setAttribute('hh_cols', $hh_cols);
+				$aligned_cols[$hit_num] = $hh_cols;
+
+				#print "DEBUG: $hit_num $hh_cols\n";
+
+				#my $query_hmm_range	= $F[8];
+				my $query_hmm_range	= $G[6];
+				$hh_hit_summ_node->appendTextChild('hh_query_hmm_range', $query_hmm_range);
+
+				#my $temp_hmm_range	= $F[9];
+				my $temp_hmm_range	= $G[7];
+				$temp_hmm_range =~ /-(\d+)/;
+				my $end = $1;
+				$template_ends{$hit_num}{$hit_ecod_domain_id} = $end;
+				#print "$hit_ecod_domain_id $end\n";
+				$hh_hit_summ_node->appendTextChild('hh_template_hmm_range', $temp_hmm_range);
+
+				#my $temp_hmm_num	= $F[10];
+				my $temp_hmm_num	= $G[8];
+				$hh_hit_summ_node->appendTextChild('hh_temp_hmm_num', $temp_hmm_num);
+	
+				$hh_hit_summ_list_node->appendChild($hh_hit_summ_node);
+				#print "1: $F[0] 2: $F[1] 3: $F[2]\n";
+			}
+		}
+
+
+		my $last_template_block_seen = 0;
+		if ($ln =~ /^No (\d+)\s+$/) { 
+			my $hit_num = $1;
+			my $uid;
+			my $ecod_domain_id;
+			my $ecod_pdb;
+			my ($hh_prob, $hh_eval, $hh_score, $aligned_cols, $idents, $sum_probs, $similarities);
+			my $observed_cols = 0;
+			my $query_regexp = qr/$short_query/;
+			my $ecod_domain_id_regexp;
+			my ($template_ln, $query_ln);
+			my ($query_start, $template_start, $query_end, $template_end);
+			if (!$aligned_cols[$hit_num]) { 
+				die "No aligned_cols found for $hit_num $aligned_cols[$hit_num]\n";
+			}
+			if ($aligned_cols[$hit_num] < 10) { 
+				while (my $ln = <IN>) { 
+					if ($ln =~ /T ss_conf/) { 
+						last;
+					}
+				}
+			}else{
+
+				my $hh_hit_node	= $hh_xml_doc->createElement('hh_hit');
+				$hh_hit_list_node->appendChild($hh_hit_node);
+
+				
+				while (my $ln = <IN>) { 
+					if ($ln =~ /^\s+$/ && $last_template_block_seen){ 
+						#print "$query_start\t$query_ln\n$template_start\t$template_ln\n";
+
+						my @query_align_chars    = split('', $query_ln);
+						my @template_align_chars = split('', $template_ln);
+
+						my @query_aligned_positions;
+						my @template_aligned_positions;
+
+						my $query_pos = $query_start;
+						my $template_pos = $template_start;
+
+						for (my $i = 0; $i < scalar(@query_align_chars); $i++) { 
+							if ($query_align_chars[$i] eq '-') { 
+								$template_pos++;
+							}elsif($template_align_chars[$i] eq '-') { 
+								$query_pos++;
+							}elsif($template_align_chars[$i] =~ /[A-Z]/ && $query_align_chars[$i] =~ /[A-Z]/) { 
+								push (@query_aligned_positions, $query_pos);
+								push (@template_aligned_positions, $template_pos);
+								$template_pos++;
+								$query_pos++;
+							}
+						}
+						my $template_range = 'NA';
+						if (scalar(@template_aligned_positions) > 2) { 
+							$template_range 	= rangify(@template_aligned_positions);
+						}
+						my $query_range = 'NA';
+						if (scalar(@query_aligned_positions) > 2) { 
+							$query_range		= rangify(@query_aligned_positions);
+						}
+						#3/21/2012 -- modification from struct_seqid to seqid.
+						#Whether you use struct_seqid or seqid as FA input, buildali.pl will expand to full sequence.
+						#2/26/2013
+						#But does hhblits? 
+						#my $query_seqid_aref = struct_region(\@query_aligned_positions, $query_seqid_aref);
+						#multi_chain_struct_region -- returns 3 values, correct use of pos array. What's going on, profile change??
+						my ($query_structregion_seqid_aref, $query_structregion_chain_seqid_aref, $warning);
+						if ($input eq 'seqid') { 
+							($query_structregion_seqid_aref, $query_structregion_chain_seqid_aref, $warning) = multi_chain_struct_region(\@query_aligned_positions, $query_seqid_aref, $query_chain_seqid_aref);
+						}else{
+							($query_structregion_seqid_aref, $query_structregion_chain_seqid_aref, $warning) = multi_chain_struct_region(\@query_aligned_positions, $query_struct_seqid_aref, $query_chain_struct_seqid_aref);
+						}
+
+						if ($query_structregion_seqid_aref == 0) { 
+							printf "Fail on mc struct region: %i %i %i\n",  scalar(@query_aligned_positions), scalar(@$query_seqid_aref), scalar(@$query_chain_seqid_aref);
+							die;
+						}
+						my $query_seqid_range = 'NA';
+						if (scalar(@$query_structregion_seqid_aref) > 2) { 
+							$query_seqid_range = multi_chain_rangify($query_structregion_seqid_aref, $query_structregion_chain_seqid_aref);
+						}
+						print "qsr?$query_seqid_range\n";
+						my $query_pdb_range = multi_chain_pdb_rangify($query_structregion_seqid_aref, $query_pdbnum_aref, $query_structregion_chain_seqid_aref);
+						my $ecod_range;
+						print "qpdb?$query_pdb_range\n";
+
+						my @ecod_chains;
+						my @ecod_segs;
+						my $imp_segs = 0;
+
+						#TEMPLATE RANGE MAY BE MULTI CHAIN
+						if ($$seqid_range_href{$uid}) { 
+							#($scop_range, $template_chain) = scop_range_split($$scop_range_href{$scop_id});
+							#$template_domain_struct_seqid_aref = range_expand($scop_range);
+							my @ecod_chunks = split(/,/, $$seqid_range_href{$uid});
+							foreach my $chunk (@ecod_chunks) { 
+								if ($chunk =~ /(\w+):\s*$/) { 
+									my $ecod_chain = $1;
+									push(@ecod_chains, $ecod_chain);
+									push(@ecod_segs, 'FULL');
+									$imp_segs++;
+								}elsif($chunk =~ /(\w+):(\-?\d+\-\d+)/) { 
+									my $ecod_chain = $1;
+									my $ecod_seg = $2;
+									push (@ecod_chains, $ecod_chain);
+									push (@ecod_segs, $ecod_seg);
+								}else{
+									print "WARNING! $sub: Bad range chunk $chunk\n";
+									next;
+								}
+							}
+						}else{
+							print "$ecod_domain_id deprecated, skipping...\n";
+							$hh_hit_node->setAttribute('structure_obsolete', 'true');
+							last;
+						}
+						my $template_struct_seqid_range;
+						my $template_struct_pdb_range;
+						my $template_coverage = 'Unk';
+						my $ungapped_template_coverage = 'Unk';
+						if ($imp_segs == scalar(@ecod_segs)) { 
+							print "DEBUG $sub: case 1\n";
+							my ($template_seqid_aref, $template_struct_seqid_aref, $ecod_pdbnum_href, $asym_id, $template_chain_aref) = pdbml_mc_seq_parse($ecod_pdb, \@ecod_chains);
+							if (!$template_seqid_aref) { 
+								print "WARNING! $ecod_pdb obsolete!\n";
+								last;
+							}
+							#1.Change pos-inx into seqid inx
+							my $template_range_aref = range_expand($template_range); #alignment pos-inx
+							my ($template_aligned_seqid_range_aref, $template_aligned_chain_aref, $warning) = multi_chain_struct_region($template_range_aref, $template_struct_seqid_aref, $template_chain_aref);
+
+							#Output template struct_seqid and struct_pdb ranges
+							$template_struct_seqid_range 	 = multi_chain_rangify($template_aligned_seqid_range_aref, $template_aligned_chain_aref);
+							print "tssr??$template_struct_seqid_range\n";
+							$template_struct_pdb_range	 = multi_chain_pdb_rangify($template_aligned_seqid_range_aref, $ecod_pdbnum_href, $template_aligned_chain_aref);
+
+							#Template coverage should be number of aligned positions / total number of tmeplate positions
+
+							#Generate coverage
+							$template_coverage = multi_chain_region_coverage($template_aligned_seqid_range_aref, $template_aligned_chain_aref, $template_seqid_aref, $template_chain_aref);
+							#Generate ungapped coverage	
+							my $ungapped_template_struct_seqid_range = multi_chain_ungap_range($template_struct_seqid_range, $GAP_TOL);
+							my ($ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref) = multi_chain_range_expand($ungapped_template_struct_seqid_range);
+							$ungapped_template_coverage = multi_chain_region_coverage($template_aligned_seqid_range_aref, $template_aligned_chain_aref, $template_seqid_aref, $template_chain_aref);
+
+						}else{
+							my @template_seqid;
+							my @template_chain;
+							for (my $i = 0; $i < scalar(@ecod_chains); $i++) { 
+								my $ecod_chain 	= $ecod_chains[$i];
+								my $ecod_seg 	= $ecod_segs[$i];
+								if ($ecod_seg eq 'FULL') { 
+									my ($ecod_seqid_aref, $ecod_struct_seqid_aref, $ecod_pdbnum_aref, $asym_id) = pdbml_seq_parse($ecod_pdb, $ecod_chain); #?
+									if (!$ecod_seqid_aref) { 
+										print "WARNING! $ecod_pdb obsolete\n";
+										last;
+									}
+									$ecod_seg = rangify($ecod_struct_seqid_aref);#This is problematic
+									$ecod_seg = ungap_range($ecod_seg, $GAP_TOL);
+								}
+								#print "i: $i seg: $ecod_seg\n";
+								my $ecod_seg_aref = range_expand($ecod_seg);
+								push (@template_seqid, @$ecod_seg_aref);
+								for (my $i = 0; $i < scalar(@$ecod_seg_aref); $i++) { 
+									push(@template_chain, $ecod_chain);
+								}
+							}
+							if (scalar(@template_seqid) == 0) { 
+								print "WARNING! No structured residues in template $ecod_domain_id\n";
+								last;
+							}
+
+							my ($ecod_seqid_aref, $ecod_struct_seqid_aref, $ecod_pdbnum_href, $asym_id, $chain_aref) = pdbml_mc_seq_parse($ecod_pdb, \@ecod_chains);
+							if (!$ecod_seqid_aref) { 
+								print "WARNING! $ecod_pdb obsolete!\n";
+								last;
+							}
+							#Change pos-inx into seqid_inx
+							my $template_range_aref = range_expand($template_range); #Alignment pos-inx
+							my ($template_aligned_seqid_aref, $template_aligned_chain_aref, $warning) = multi_chain_struct_region($template_range_aref, \@template_seqid, \@template_chain); 
+
+							if ($warning == scalar(@$template_range_aref)) { 
+								print "WARNING! $ecod_domain_id is empty, check for corrupt HHM!\n";
+								last;
+							} 
+							#Output tmeplate struct_seqid and struct_pdb ranges
+							print "foo $ecod_domain_id\t";
+							$template_struct_seqid_range 	= multi_chain_rangify($template_aligned_seqid_aref, $template_aligned_chain_aref);
+							$template_struct_pdb_range	    = multi_chain_pdb_rangify($template_aligned_seqid_aref, $ecod_pdbnum_href, $template_aligned_chain_aref);
+							print "tssr: $template_struct_seqid_range, tspr: $template_struct_pdb_range\n";
+							print "bar\n";
+
+							#$template_coverage 		= region_coverage(\@template_seqid, $template_aligned_seqid_aref);
+							$template_coverage		= multi_chain_region_coverage(\@template_seqid, \@template_chain, $template_aligned_seqid_aref, $template_aligned_chain_aref);
+							my $ungapped_template_struct_seqid_range = multi_chain_ungap_range($template_struct_seqid_range, $GAP_TOL);
+							my ($ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref) = multi_chain_range_expand($ungapped_template_struct_seqid_range);
+							$ungapped_template_coverage = multi_chain_region_coverage(\@template_seqid, \@template_chain, $ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref);
+							printf "tc: %0.2f utc: %0.2f\n", $template_coverage, $ungapped_template_coverage;
+
+
+						}
+
+						if ($template_coverage < 0.7) { 
+							$hh_hit_node->setAttribute('low_coverage_hit', 'true');
+						} 
+
+						$hh_hit_node->appendTextChild('template_range', $template_range);
+						$hh_hit_node->appendTextChild('query_range', $query_range);
+						$hh_hit_node->appendTextChild('query_seqid_range', $query_seqid_range);
+						$hh_hit_node->appendTextChild('query_pdb_range', $query_pdb_range);
+
+						my $template_seqid_range_node	= $hh_xml_doc->createElement('template_seqid_range');
+						$template_seqid_range_node->appendTextNode($template_struct_seqid_range);
+						$hh_hit_node->appendChild($template_seqid_range_node);
+						$template_seqid_range_node->setAttribute('coverage', $template_coverage);
+						$template_seqid_range_node->setAttribute('ungapped_coverage', $ungapped_template_coverage);
+
+						my $template_pdb_range_node	= $hh_xml_doc->createElement('template_pdb_range');
+						$template_pdb_range_node->appendTextNode($template_struct_pdb_range);
+						$hh_hit_node->appendChild($template_pdb_range_node);
+						$template_pdb_range_node->setAttribute('coverage', $template_coverage);
+						$template_seqid_range_node->setAttribute('ungapped_coverage', $ungapped_template_coverage);
+
+						#define
+						last;
+
+					} 
+
+					if ($ln =~ /^>((d|e)\w{4}[\w\.]+)/) { 
+						#$uaid = $1;
+						#$scop_id = $$scop_id_aref[uaid_to_unid($uaid)];
+						#if ($$scop_id_href{$uaid}) { 
+						#	$bong_id	= $$scop_id_href{$uaid};
+						#}else{
+						#	$bong_id 	= 'Unk';
+						#}
+
+						#if ($$ecod_id_href{$uaid}) { 
+						#	$ecod_domain_id	= $$ecod_id_href{$uaid};
+						#}else{
+						#	$ecod_domain_id	= 'Unk';
+						#}
+
+						$ecod_domain_id = $1;
+						$uid = $$uid_lookup{$ecod_domain_id};
+						
+						#my $unid = uaid_to_unid($uaid);
+						if ($ecod_domain_id =~ /(d|e)(\w{4})/)  { 
+							$ecod_pdb = $2;
+						}else{
+							$ecod_pdb = 'Unk';
+						}
+						#print "uaid: $uaid scopid: $scop_id\n";
+						#print "$ecod_pdb $ecod_domain_id\n";
+						#$uaid_regexp = qr/$uaid/;
+						$ecod_domain_id_regexp = qr/$ecod_domain_id/;
+
+						$hh_hit_node->setAttribute('uid', $uid);
+						#$hh_hit_node->setAttribute('bhk_ecod_id', $bong_id);
+						$hh_hit_node->setAttribute('ecod_domain_id', $ecod_domain_id);
+						#print "DEBUG: $uid $ecod_domain_id\n";
+						next;
+					}
+					if ($ln =~ /Probab=(\d+\.\d{2})\s+E-value=([\w\.\-\+]+)\s+Score=([\-\d\.]+)\s+Aligned_cols=(\d+)\s+Identities=([\d\.]+%)\s+Similarity=(\-?[\d\.]+)\s+Sum_probs=([\d\.]+)/) { 
+						$hh_prob 	= $1;
+						$hh_eval 	= $2;
+						$hh_score	= $3;
+						$aligned_cols 	= $4;
+						$idents		= $5;
+						$similarities 	= $6;
+						$sum_probs 	= $7;
+						#print "prob: $hh_prob eval: $hh_eval score: $hh_score cols: $aligned_cols ident: $idents sim: $similarities sprobs: $sum_probs\n";
+						$hh_hit_node->setAttribute('hh_prob', $hh_prob);
+						$hh_hit_node->setAttribute('hh_eval', $hh_eval);
+						$hh_hit_node->setAttribute('hh_score', $hh_score);
+						$hh_hit_node->setAttribute('aligned_cols', $aligned_cols);
+						$hh_hit_node->setAttribute('idents', $idents);
+						$hh_hit_node->setAttribute('similarities', $similarities);
+						$hh_hit_node->setAttribute('sum_probs', $sum_probs);
+						
+						next;
+					}
+
+					if ($ln =~ /^(Q|T) ss_pred/) { next } 
+					if ($ln =~ /^(Q|T) ss_conf/) { next } 
+
+					if ($ln =~ /^Confidence\s+([\d+\s+])/) { 
+						my $conf = $1;
+						print "C?: ($conf)\n";
+						next;
+					} 
+
+
+
+					if ($ln =~ /^Q\s+$query_regexp\s+(\d+)\s+([\w\-]+)\s+(\d+)\s+\((\d+)\)/) { 
+						if (!defined($query_start)) { 
+							$query_start = $1;
+						}
+						$query_ln .= $2;
+						$query_end = $3;
+						#my $query_total = $4;
+						#print "Q: $query_start $query_ln $query_end\n";
+						next;
+					}
+					if ($ln =~ /^T\s+$ecod_domain_id_regexp\s+(\d+)\s+([\w\-]+)\s+(\d+)\s+\((\d+)\)/) { 
+						if (! defined($template_start)) { 
+							$template_start = $1;
+						}
+						$template_ln .= $2;
+						$template_end = $3;
+						#my $template_total = $4;
+
+						#print "T: $template_start $template_ln $template_end\n";
+
+						#print "$result_fn $bong_id $uaid $hit_num $template_end $template_ends{$hit_num}{$uaid}\n";
+						
+						#if (!defined($aligned_cols)) { 
+						#	die "r:$result_fn\n";
+						#}
+							
+						if ($template_end == $template_ends{$hit_num}{$ecod_domain_id}) { 
+							$last_template_block_seen = 1;
+						}
+						next;
+					}
+					if ($ln =~ /^\s+$/) { next }
+				}
+			}
+		}
+	}
+	close IN;
+
+	my $doc_string = $hh_xml_doc->toString(1);
+	open (OUT, ">$out") or die "Could not open $out for writing:$!\n";
+	print OUT $doc_string;
+}
+sub self_comp_process { 
+	my $sub = 'self_comp_process';
+
+	my ($self_comp_xml, $bs_node, $bs_doc) = @_;
+
+	if (!-f $self_comp_xml || -s $self_comp_xml == 0) { 
+		print "WARNING! $sub: self comp xml file not found, skipping...\n";
+		return 0;
+	}
+
+	my $xml_fh;
+	open ($xml_fh, $self_comp_xml) or die "ERROR! $sub: Could not open $self_comp_xml for reading:$!\n";
+	my $self_comp_xml_doc = XML::LibXML->load_xml( IO => $xml_fh );
+	close $xml_fh;
+
+	my $self_comp_run_node = $bs_doc->createElement('self_comp_run');
+	$self_comp_run_node->setAttribute('programs', 'dali');
+
+	$bs_node->appendChild($self_comp_run_node);
+
+	my $structural_repeat_XPath = '//repeat_top/structural_repeat';
+
+	my $structural_repeat_nodes = $self_comp_xml_doc->findnodes($structural_repeat_XPath);
+
+	if ($DEBUG) { 
+		my $size = $structural_repeat_nodes->size();
+		print "DEBUG: $sub: struct repeat nodes size $size\n";
+	}
+
+	my $self_comp_hits_node = $bs_doc->createElement('hits');
+	$self_comp_run_node->appendChild($self_comp_hits_node);
+	
+	foreach my $s_node ($structural_repeat_nodes->get_nodelist() ) { 
+		
+		my $aligner	= $s_node->findvalue('@aligner');
+		my $z_score	= $s_node->findvalue('@zscore');
+
+		my $reference_seqid_range	= $s_node->findvalue('ref_range');
+		my $mobile_seqid_range		= $s_node->findvalue('mob_range');
+
+		my $bs_s_node = $bs_doc->createElement('hit');
+
+		$bs_s_node->setAttribute('aligner', $aligner);
+		$bs_s_node->setAttribute('z_score', $z_score);
+
+		my $ref_seqid_range_node	= $bs_doc->createElement('query_reg');
+		$ref_seqid_range_node->appendTextNode($reference_seqid_range);
+		$bs_s_node->appendChild($ref_seqid_range_node);
+		
+		my $mob_seqid_range_node	= $bs_doc->createElement('hit_reg');
+		$mob_seqid_range_node->appendTextNode($mobile_seqid_range);
+		$bs_s_node->appendChild($mob_seqid_range_node);
+
+		$self_comp_hits_node->appendChild($bs_s_node);
+
+	}
+
+	my $sequence_self_comp_run_node	= $bs_doc->createElement('self_comp_run');
+	$sequence_self_comp_run_node->setAttribute('programs', 'hhrepid');
+
+	$bs_node->appendChild($sequence_self_comp_run_node);
+
+	my $sequence_self_comp_hits_node = $bs_doc->createElement('repeat_set_list');
+	$sequence_self_comp_run_node->appendChild($sequence_self_comp_hits_node);
+
+	my $sequence_repeat_XPath = '//repeat_top/sequence_repeat_set';
+
+	my $sequence_repeat_nodes = $self_comp_xml_doc->findnodes($sequence_repeat_XPath);
+
+	if ($DEBUG) { 
+		my $size = $sequence_repeat_nodes->size();
+		print "DEBUG $sub: Sequence repeat set nodes size $size\n";
+	}
+
+	foreach my $set_node ($sequence_repeat_nodes->get_nodelist() ) { 
+
+		my $aligner	= $set_node->findvalue('@aligner');
+		my $type	= $set_node->findvalue('@type');
+
+		my $repeat_nodes = $set_node->findnodes('sequence_repeat');
+
+		if ($DEBUG) { 
+			my $size = $repeat_nodes->size();
+			print "DEBUG $sub: Sequence repeat nodes size $size\n";
+		}
+
+		my @rep_ranges;
+		my @set_range;
+		my $i = 0;
+		foreach my $s_node ($repeat_nodes->get_nodelist() ) { 
+			my $prob 	= $s_node->findvalue('@prob');
+			my $range 	= $s_node->findvalue('range');
+			$rep_ranges[$i]{prob} = $prob;
+			$rep_ranges[$i]{range} = $range;
+			$i++;
+			push (@set_range, $range);
+
+		}
+
+		my $bs_s_node = $bs_doc->createElement('repeat_set');
+
+		$bs_s_node->setAttribute('aligner', $aligner);
+		$bs_s_node->setAttribute('type', $type);
+
+		my $seqid_range_node	= $bs_doc->createElement('seqid_range');
+		$seqid_range_node->appendTextNode(join(',', @set_range));
+
+		$bs_s_node->appendChild($seqid_range_node);
+		$sequence_self_comp_hits_node->appendChild($bs_s_node);
+
+	}
+}
+
+
+
+sub chain_blast_process { 
+	my $sub = 'chain_blast_process';
+
+	my ($blast_xml, $bs_node, $bs_doc) = @_;
+
+	if (!-f $blast_xml || -s $blast_xml == 0) { 
+		print "WARNING! $sub: BLAST xml result file $blast_xml not found, skipping...\n";
+		return 0;
+	}
+
+	if ($DEBUG) { 
+		print "DEBUG: $sub top\n";
+	}
+
+	my $xml_fh;
+	open ($xml_fh, $blast_xml) or die "Could not open $blast_xml for reading:$!\n";
+	my $blast_xml_doc = XML::LibXML->load_xml( IO => $xml_fh, load_ext_dtd => 0 );
+	close $xml_fh;
+
+	my $bs_run_node	= $bs_doc->createElement('chain_blast_run');
+
+	my $blast_program = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_program');
+	$bs_run_node->setAttribute('program', $blast_program);
+
+	my $blast_version = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_version');
+	$bs_run_node->setAttribute('version', $blast_version);	
+
+	my $blast_db	  = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_db');
+	my $bs_db_node	= $bs_doc->createElement('blast_db');
+	$bs_db_node->appendTextNode($blast_db);
+
+	my $blast_query   = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-def');
+	my $bs_query_node	= $bs_doc->createElement('blast_query');
+	$bs_query_node->appendTextNode($blast_query);
+
+	my $blast_query_len = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-len');
+	my $bs_query_len_node	= $bs_doc->createElement('query_len');
+	$bs_query_len_node->appendTextNode($blast_query_len);
+
+	my $bs_hit_list_node	= $bs_doc->createElement('hits');
+
+	$bs_node->appendChild($bs_run_node);
+	$bs_run_node->appendChild($bs_db_node);
+	$bs_run_node->appendChild($bs_query_node);
+	$bs_run_node->appendChild($bs_query_len_node);
+	$bs_run_node->appendChild($bs_hit_list_node);
+
+	my $iteration_nodes = $blast_xml_doc->findnodes('//BlastOutput_iterations/Iteration');
+
+	foreach my $iter_node ($iteration_nodes->get_nodelist() ) { 
+
+		my $iter_num 	= $iter_node->findvalue('Iteration_iter_num');
+		my $iteration_hits_nodes = $iter_node->findnodes('Iteration_hits/Hit');
+
+		foreach my $hit_node ($iteration_hits_nodes->get_nodelist() ) { 
+
+			my $hit_num	= $hit_node->findvalue('Hit_num');
+
+			my $hit_def 	= $hit_node->findvalue('Hit_def');
+			#my $hit_domain_id = 'NA';
+			#if ($hit_def =~ /((d|g|e)\d\w{3}.{2})/) { 
+			#	$hit_domain_id = $1;
+			#}
+		
+			my $hit_pdb	= 'NA';
+			my $hit_chain	= 'NA';
+			if ($hit_def =~ /(\w{4})\s(\w+)/) { 
+				$hit_pdb 	= $1;
+				$hit_chain 	= $2;
+			}
+
+			my $hit_hsps_nodes = $hit_node->findnodes('Hit_hsps/Hsp');
+
+			#if ($hit_hsps_nodes->size() > 1) { next } 
+
+			my @hit_segs;
+			my @query_segs;
+
+			my @hseqs;
+			my @qseqs;
+
+			my $hit_len	= $hit_node->findvalue('Hit_len');
+			
+			my @evals;
+			my $hsp_count = 0;
+
+			my @unused_hit_seqid = (1 .. $hit_len);
+			my @unused_query_seqid = (1 .. $blast_query_len);
+
+			my @used_hit_seqid;
+			my @used_query_seqid;
+
+			my $hit_align_len = 0;
+
+			my @tmp_hit_segs;
+			my @tmp_query_segs;
+			my @tmp_evals;
+			my @tmp_qseq;
+
+			my @tmp_hseqs;
+			my @tmp_qseqs;
+
+			foreach my $hsp_node ($hit_hsps_nodes->get_nodelist() ) { 
+
+				my $hsp_num			= $hsp_node->findvalue('Hsp_num');
+				my $hsp_evalue		= $hsp_node->findvalue('Hsp_evalue');
+				my $hsp_align_len 	= $hsp_node->findvalue('Hsp_align-len');
+
+				#if (abs($hsp_align_len - $hit_len) > 10) { next } 
+
+				my $hsp_query_from 	= $hsp_node->findvalue('Hsp_query-from');
+				my $hsp_query_to	= $hsp_node->findvalue('Hsp_query-to');
+
+				my $hsp_hit_from	= $hsp_node->findvalue('Hsp_hit-from');
+				my $hsp_hit_to		= $hsp_node->findvalue('Hsp_hit-to');
+
+				my @hsp_query_seqid = ($hsp_query_from .. $hsp_query_to);
+				my @hsp_hit_seqid = ($hsp_hit_from .. $hsp_hit_to);
+
+				my $unused_query_coverage = region_coverage(\@hsp_query_seqid, \@unused_hit_seqid);	
+				my $unused_hit_coverage = region_coverage(\@hsp_hit_seqid, \@unused_query_seqid);
+
+				my $used_query_residues = residue_coverage(\@hsp_query_seqid, \@used_query_seqid);
+				my $used_hit_residues = residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+
+				my $hsp_qseq	= $hsp_node->findvalue('Hsp_qseq');
+				my $hsp_hseq	= $hsp_node->findvalue('Hsp_hseq');
+
+				print "$hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
+				#v1 5 used 5 unused
+				#v2 10 used 5 unused
+				if ($DEBUG ) { 
+					print "DEBUG $hsp_evalue $used_hit_residues $used_query_residues\n";
+				}
+				if ($hsp_evalue < $HSP_EVALUE_THRESHOLD  && $used_hit_residues < 10 && $used_query_residues < 5) { 
+					push (@tmp_query_segs, "$hsp_query_from-$hsp_query_to");
+					push (@tmp_hit_segs, "$hsp_hit_from-$hsp_hit_to");
+					push (@tmp_evals, $hsp_evalue);
+
+					push (@tmp_qseqs, $hsp_qseq);
+					push (@tmp_hseqs, $hsp_hseq);
+					$hsp_count++;
+
+					$hit_align_len += $hsp_align_len;
+
+					range_include(\@hsp_query_seqid, \@used_query_seqid);
+					range_include(\@hsp_hit_seqid, \@used_hit_seqid);
+
+					range_exclude(\@hsp_query_seqid, \@unused_query_seqid);
+					range_exclude(\@hsp_hit_seqid, \@unused_hit_seqid);
+				}else{
+					print "SKIP $hit_num $hsp_num $used_hit_residues $used_query_residues\n";
+					#exit;
+				}
+			}
+
+			#my $hit_diff_tol = 10; #Difference between the leength of the alignment and the length of the hit
+			#my $hit_diff_tol = 20; #Difference between the leength of the alignment and the length of the hit
+			my $hit_diff_tol = 50; #Difference between the leength of the alignment and the length of the hit
+			#my $query_diff_tol = 10; #Difference between the lenght of the query and the length of the hit
+			#my $query_diff_tol = 20; #Difference between the lenght of the query and the length of the hit
+			my $query_diff_tol = 50; #Difference between the lenght of the query and the length of the hit
+			if ( abs($hit_align_len - $hit_len) < $hit_diff_tol && abs($blast_query_len - $hit_len) < $query_diff_tol ){ 
+				push (@hit_segs, @tmp_hit_segs);
+				push (@query_segs, @tmp_query_segs);
+				push (@evals, @tmp_evals);
+
+				push (@qseqs, @tmp_qseqs);
+				push (@hseqs, @tmp_hseqs);
+			}else{ 
+				if ($DEBUG) { 
+					print "hal $hit_align_len hl $hit_len bql $blast_query_len hl $hit_len\n";
+				}	
+				next;
+			}
+
+
+			if (scalar(@query_segs) > 0) { 
+				my $bs_hit_node = $bs_doc->createElement('hit');
+
+				my %eval_map;
+				for (my $i = 0; $i < scalar(@hit_segs); $i++) { 
+					$eval_map{$hit_segs[$i]} = $evals[$i];
+				}
+
+				@hit_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @hit_segs;
+				@query_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @query_segs;
+				@evals = map {$_->[0]} sort {$a->[1] =~ /(\d+)\-/; my $anum = $1; $b->[1] =~ /(\d+)/; my $bnum = $1; $anum <=> $bnum} map { [$eval_map{$_}, $_]} @hit_segs;
+
+				my $hit_query_reg = join(",", @query_segs);
+				my $hit_hit_reg	= join(',', @hit_segs);
+				my $hit_query_evals = join(",", @evals);
+
+				my $hit_hseq = join(",", @hseqs);
+				my $hit_qseq = join(",", @qseqs);
+				
+				if ($DEBUG) { 
+					print "DEBUG $sub: $hit_num $hit_pdb $hit_chain $hit_query_reg\n";
+				}
+				$bs_hit_node->setAttribute('num', $hit_num);
+				#$bs_hit_node->setAttribute('domain_id', $hit_domain_id);
+				$bs_hit_node->setAttribute('pdb_id', $hit_pdb);
+				$bs_hit_node->setAttribute('chain_id', $hit_chain);
+				$bs_hit_node->setAttribute('hsp_count', $hsp_count);
+				$bs_hit_node->setAttribute('evalues', $hit_query_evals);
+
+				my $bs_query_reg_node = $bs_doc->createElement('query_reg');
+				$bs_query_reg_node->appendTextNode($hit_query_reg);
+				$bs_hit_node->appendChild($bs_query_reg_node);
+
+				my $bs_hit_reg_node = $bs_doc->createElement('hit_reg');
+				$bs_hit_reg_node->appendTextNode($hit_hit_reg);
+				$bs_hit_node->appendChild($bs_hit_reg_node);
+
+				my $bs_query_seq_node	= $bs_doc->createElement('query_seq');
+				$bs_query_seq_node->appendTextNode($hit_qseq);
+				$bs_hit_node->appendChild($bs_query_seq_node);
+
+				my $bs_hit_seq_node	= $bs_doc->createElement('hit_seq');
+				$bs_hit_seq_node->appendTextNode($hit_hseq);
+				$bs_hit_node->appendChild($bs_hit_seq_node);
+
+				$bs_hit_list_node->appendChild($bs_hit_node);
+			}
+		}
+	}
+}
+
+sub blast_process_v2 { 
+	my $sub = 'blast_process_v2';
+	my ($blast_xml, $bs_node, $bs_doc) = @_;
+
+	if (!-f $blast_xml || -s $blast_xml == 0) { 
+		print "WARNING! $sub: BLAST xml result file $blast_xml not found, skipping...\n";
+		return 0;
+	}
+
+	if ($DEBUG) { 
+		print "DEBUG $sub top\n";
+	}
+
+	my $xml_fh;
+	open ($xml_fh, $blast_xml) or die "Could not open $blast_xml for reading:$!\n";
+	my $blast_xml_doc = XML::LibXML->load_xml( IO => $xml_fh, load_ext_dtd => 0 );
+	close $xml_fh;
+
+	my $bs_run_node	= $bs_doc->createElement('blast_run');
+
+	my $blast_program = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_program');
+	$bs_run_node->setAttribute('program', $blast_program);
+
+	my $blast_version = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_version');
+	$bs_run_node->setAttribute('version', $blast_version);	
+
+	my $blast_db	  = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_db');
+	my $bs_db_node	= $bs_doc->createElement('blast_db');
+	$bs_db_node->appendTextNode($blast_db);
+
+	my $blast_query   = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-def');
+	my $bs_query_node	= $bs_doc->createElement('blast_query');
+	$bs_query_node->appendTextNode($blast_query);
+
+	my $blast_query_len = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-len');
+	my $bs_query_len_node	= $bs_doc->createElement('query_len');
+	$bs_query_len_node->appendTextNode($blast_query_len);
+
+	my $bs_hit_list_node	= $bs_doc->createElement('hits');
+
+	$bs_node->appendChild($bs_run_node);
+	$bs_run_node->appendChild($bs_db_node);
+	$bs_run_node->appendChild($bs_query_node);
+	$bs_run_node->appendChild($bs_query_len_node);
+	$bs_run_node->appendChild($bs_hit_list_node);
+
+	#print "#$blast_program $blast_version $blast_db\n";
+	#print "#$blast_query $blast_query_len\n";
+
+	my $iteration_nodes = $blast_xml_doc->findnodes('//BlastOutput_iterations/Iteration');
+
+	foreach my $iter_node ($iteration_nodes->get_nodelist() ) { 
+
+		my $iter_num 				= $iter_node->findvalue('Iteration_iter_num');
+		my $iteration_hits_nodes = $iter_node->findnodes('Iteration_hits/Hit');
+
+		foreach my $hit_node ($iteration_hits_nodes->get_nodelist() ) { 
+
+			my $hit_num	= $hit_node->findvalue('Hit_num');
+
+			my $hit_def 	= $hit_node->findvalue('Hit_def');
+			my $hit_domain_id = 'NA';
+			my $hit_pdb;
+			my $hit_chain;
+			if ($hit_def =~ /((d|g|e)(\d\w{3})\w+\d+)\s+(\w+):/) { 
+				$hit_domain_id = $1;
+				$hit_pdb = $3;
+				$hit_chain = $4;
+			}
+			my %hit_meta;
+			$hit_meta{num} 			= $hit_num;
+			$hit_meta{domain_id} 	= $hit_domain_id;
+			$hit_meta{pdb_id} 		= $hit_pdb;
+			$hit_meta{chain_id} 	= $hit_chain;
+
+			
+
+			my $hit_hsps_nodes = $hit_node->findnodes('Hit_hsps/Hsp');
+
+			#if ($hit_hsps_nodes->size() > 1) { next } 
+
+			my @hit_segs;
+			my @query_segs;
+
+			my $hit_len	= $hit_node->findvalue('Hit_len');
+			
+			my @evals;
+			my $hsp_count = 0;
+
+			my @unused_hit_seqid = (1 .. $hit_len);
+			my @unused_query_seqid = (1 .. $blast_query_len);
+
+			my @used_hit_seqid;
+			my @used_query_seqid;
+
+			my $hit_align_len = 0;
+
+			my @tmp_hit_segs;
+			my @tmp_query_segs;
+			my @tmp_evals;
+			my $hsp_overlap = 0;
+			foreach my $hsp_node ($hit_hsps_nodes->get_nodelist() ) { 
+
+				my $hsp_num	= $hsp_node->findvalue('Hsp_num');
+
+				my $hsp_evalue	= $hsp_node->findvalue('Hsp_evalue');
+
+				my $hsp_align_len = $hsp_node->findvalue('Hsp_align-len');
+
+				#if (abs($hsp_align_len - $hit_len) > 10) { next } 
+
+				my $hsp_query_from 	= $hsp_node->findvalue('Hsp_query-from');
+				my $hsp_query_to	= $hsp_node->findvalue('Hsp_query-to');
+
+				my $hsp_hit_from	= $hsp_node->findvalue('Hsp_hit-from');
+				my $hsp_hit_to		= $hsp_node->findvalue('Hsp_hit-to');
+
+				my @hsp_query_seqid = ($hsp_query_from .. $hsp_query_to);
+				my @hsp_hit_seqid = ($hsp_hit_from .. $hsp_hit_to);
+
+				my $unused_query_coverage 	= region_coverage(\@hsp_query_seqid, \@unused_hit_seqid);	
+				my $unused_hit_coverage 	= region_coverage(\@hsp_hit_seqid, \@unused_query_seqid);
+
+				my $used_query_residues = residue_coverage(\@hsp_query_seqid, \@used_query_seqid);
+				my $used_hit_residues 	= residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+
+				print "$hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
+				#v1 5 used 5 unused
+				#v2 10 used 5 unused
+				if ($DEBUG) { 
+					print "DEBUG $hsp_evalue $used_hit_residues $used_query_residues\n";
+				}
+				if ($hsp_evalue < $HSP_EVALUE_THRESHOLD  && $used_hit_residues < 10 && $used_query_residues < 5) { 
+					#push (@tmp_query_segs, "$hsp_query_from-$hsp_query_to");
+					#push (@tmp_hit_segs, "$hsp_hit_from-$hsp_hit_to");
+					push (@tmp_evals, $hsp_evalue);
+					$hsp_count++;
+
+					$hit_align_len += $hsp_align_len;
+					#Assumes N-terminal extension of hit and query sequence in multi HSP hits
+					#This is very hacky, assumes much about quality of hsp overlap
+					$hsp_overlap += residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+#					if ($hsp_overlap > 0) { 
+#						my $before = rangify(@hsp_hit_seqid);
+#						my $before2 = rangify(@hsp_query_seqid);
+#						print "WARNING! hsp_overlap, $hsp_overlap\n";
+#						for (my $i = 0; $i < $hsp_overlap; $i++) { 
+#							my $removed_query = shift(@hsp_query_seqid);
+#							my $removed_hit = shift(@hsp_hit_seqid);
+#
+#							printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@hsp_query_seqid), scalar(@hsp_hit_seqid);
+#						}
+#						my $after = rangify(@hsp_hit_seqid);
+#						my $after2 = rangify(@hsp_query_seqid);
+#				
+#
+#					}
+					my $tmp_query_segs = rangify(@hsp_query_seqid);
+					my $tmp_hit_segs = rangify(@hsp_hit_seqid);
+
+					push (@tmp_query_segs, $tmp_query_segs);
+					push (@tmp_hit_segs, $tmp_hit_segs);
+					
+					range_include(\@hsp_query_seqid, \@used_query_seqid);
+					range_include(\@hsp_hit_seqid, \@used_hit_seqid);
+
+					range_exclude(\@hsp_query_seqid, \@unused_query_seqid);
+					range_exclude(\@hsp_hit_seqid, \@unused_hit_seqid);
+
+					if ( $hit_align_len / $hit_len > $HIT_COVERAGE_THRESHOLD ) { 
+						print "DEFINE!\n";
+
+						push (@hit_segs, @tmp_hit_segs);
+						push (@query_segs, @tmp_query_segs);
+						push (@evals, @tmp_evals);
+						
+						my %hsp_meta;
+						$hsp_meta{hsp_count} = $hsp_count;
+						$hsp_meta{hsp_overlap} = $hsp_overlap;
+
+						define_hit(\@hit_segs, \@query_segs, \@evals, $bs_doc, $bs_hit_list_node, \%hit_meta, \%hsp_meta); 
+						undef @query_segs;
+						undef @tmp_query_segs;
+						undef @hit_segs;
+						undef @tmp_hit_segs;
+						undef @evals;
+						undef @tmp_evals;
+						undef @used_hit_seqid;
+						$hsp_count = 0;
+						$hit_align_len = 0;
+						$used_hit_residues = 0;
+						undef %hsp_meta;
+
+					}else{ 
+						if ($DEBUG) { 
+							print "hal $hit_align_len hl $hit_len\n";
+						}
+					}
+				}else{
+					#MARK
+					print "SKIP $hit_num $hsp_num $used_hit_residues $used_query_residues\n";
+
+				}
+			}
+		}
+	}
+}
+	
+sub define_hit { 
+	my ($hit_seg_aref, $query_seg_aref, $eval_aref, $bs_xml_doc, $bs_hit_list_node, $hit_meta_href, $hsp_meta_href) = @_;
+
+	if (scalar(@$query_seg_aref) > 0) { 
+		my $bs_hit_node = $bs_xml_doc->createElement('hit');
+
+		my %eval_map;
+		for (my $i = 0; $i < scalar(@$hit_seg_aref); $i++) { 
+			$eval_map{$$hit_seg_aref[$i]} = $$eval_aref[$i];
+		}
+
+		@$hit_seg_aref = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @$hit_seg_aref;
+		@$query_seg_aref = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @$query_seg_aref;
+		@$eval_aref = map {$_->[0]} sort {$a->[1] =~ /(\d+)\-/; my $anum = $1; $b->[1] =~ /(\d+)/; my $bnum = $1; $anum <=> $bnum} map { [$eval_map{$_}, $_]} @$hit_seg_aref;
+
+		if ($$hsp_meta_href{hsp_overlap} > 0 && scalar(@$hit_seg_aref) == 2) { 
+			my $hit_seg = pop(@$hit_seg_aref);
+			my $hit_seg_aref = range_expand($hit_seg);
+			my $query_seg = pop(@$query_seg_aref);
+			my $query_seg_aref = range_expand($query_seg);
+
+			for (my $i = 0; $i < $$hsp_meta_href{hsp_overlap}; $i++)  { 
+				my $removed_query = shift(@$query_seg_aref);
+				my $removed_hit = shift(@$hit_seg_aref);
+				#printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@$query_seg_aref), scalar(@$hit_seg_aref);
+			}
+			my $mod_hit_seg = rangify(@$hit_seg_aref);
+			my $mod_query_seg = rangify(@$query_seg_aref);
+			push (@$query_seg_aref, $mod_query_seg);
+			push (@$hit_seg_aref, $mod_hit_seg);
+		}
+
+		my $hit_query_reg = join(",", @$query_seg_aref);
+		my $hit_hit_reg	= join(',', @$hit_seg_aref);
+		my $hit_query_evals = join(",", @$eval_aref);
+		
+		if ($DEBUG) { 
+			print "$$hit_meta_href{num} $$hit_meta_href{domain_id} $hit_query_reg\n";
+		}
+		$bs_hit_node->setAttribute('num', 		$$hit_meta_href{num});
+		$bs_hit_node->setAttribute('domain_id', $$hit_meta_href{domain_id});
+		$bs_hit_node->setAttribute('pdb_id', 	$$hit_meta_href{pdb_id});
+		$bs_hit_node->setAttribute('chain_id', 	$$hit_meta_href{chain_id});
+		$bs_hit_node->setAttribute('hsp_count', $$hsp_meta_href{hsp_count});
+
+		$bs_hit_node->setAttribute('evalues', 	$hit_query_evals);
+
+		my $bs_query_reg_node = $bs_xml_doc->createElement('query_reg');
+		$bs_query_reg_node->appendTextNode($hit_query_reg);
+		$bs_hit_node->appendChild($bs_query_reg_node);
+		my $bs_hit_reg_node = $bs_xml_doc->createElement('hit_reg');
+		$bs_hit_reg_node->appendTextNode($hit_hit_reg);
+		$bs_hit_node->appendChild($bs_hit_reg_node);
+		$bs_hit_list_node->appendChild($bs_hit_node);
+	}
+}
+	
+sub blast_process { 
+	my $sub = 'blast_process';
+
+	my ($blast_xml, $bs_node, $bs_doc) = @_;
+
+	if (!-f $blast_xml || -s $blast_xml == 0) { 
+		print "WARNING! $sub: BLAST xml result file $blast_xml not found, skipping...\n";
+		return 0;
+	}
+
+	if ($DEBUG) { 
+		print "DEBUG $sub top\n";
+	}
+
+	my $xml_fh;
+	open ($xml_fh, $blast_xml) or die "Could not open $blast_xml for reading:$!\n";
+	my $blast_xml_doc = XML::LibXML->load_xml( IO => $xml_fh, load_ext_dtd => 0 );
+	close $xml_fh;
+
+	my $bs_run_node	= $bs_doc->createElement('blast_run');
+
+	my $blast_program = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_program');
+	$bs_run_node->setAttribute('program', $blast_program);
+
+	my $blast_version = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_version');
+	$bs_run_node->setAttribute('version', $blast_version);	
+
+	my $blast_db	  = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_db');
+	my $bs_db_node	= $bs_doc->createElement('blast_db');
+	$bs_db_node->appendTextNode($blast_db);
+
+	my $blast_query   = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-def');
+	my $bs_query_node	= $bs_doc->createElement('blast_query');
+	$bs_query_node->appendTextNode($blast_query);
+
+	my $blast_query_len = $blast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-len');
+	my $bs_query_len_node	= $bs_doc->createElement('query_len');
+	$bs_query_len_node->appendTextNode($blast_query_len);
+
+	my $bs_hit_list_node	= $bs_doc->createElement('hits');
+
+	$bs_node->appendChild($bs_run_node);
+	$bs_run_node->appendChild($bs_db_node);
+	$bs_run_node->appendChild($bs_query_node);
+	$bs_run_node->appendChild($bs_query_len_node);
+	$bs_run_node->appendChild($bs_hit_list_node);
+
+	#print "#$blast_program $blast_version $blast_db\n";
+	#print "#$blast_query $blast_query_len\n";
+
+	my $iteration_nodes = $blast_xml_doc->findnodes('//BlastOutput_iterations/Iteration');
+
+	foreach my $iter_node ($iteration_nodes->get_nodelist() ) { 
+
+		my $iter_num 	= $iter_node->findvalue('Iteration_iter_num');
+
+		my $iteration_hits_nodes = $iter_node->findnodes('Iteration_hits/Hit');
+
+		foreach my $hit_node ($iteration_hits_nodes->get_nodelist() ) { 
+
+			my $hit_num	= $hit_node->findvalue('Hit_num');
+
+			my $hit_def 	= $hit_node->findvalue('Hit_def');
+			my $hit_domain_id = 'NA';
+			my $hit_pdb;
+			my $hit_chain;
+			if ($hit_def =~ /((d|g|e)(\d\w{3})\w+\d+)\s+(\w+):/) { 
+				$hit_domain_id = $1;
+				$hit_pdb = $3;
+				$hit_chain = $4;
+			}
+
+			my $hit_hsps_nodes = $hit_node->findnodes('Hit_hsps/Hsp');
+
+			#if ($hit_hsps_nodes->size() > 1) { next } 
+
+			my @hit_segs;
+			my @query_segs;
+
+			my $hit_len	= $hit_node->findvalue('Hit_len');
+			
+			my @evals;
+			my $hsp_count = 0;
+
+			my @unused_hit_seqid = (1 .. $hit_len);
+			my @unused_query_seqid = (1 .. $blast_query_len);
+
+			my @used_hit_seqid;
+			my @used_query_seqid;
+
+			my $hit_align_len = 0;
+
+			my @tmp_hit_segs;
+			my @tmp_query_segs;
+			my @tmp_evals;
+			my $hsp_overlap = 0;
+			foreach my $hsp_node ($hit_hsps_nodes->get_nodelist() ) { 
+
+				my $hsp_num	= $hsp_node->findvalue('Hsp_num');
+
+				my $hsp_evalue	= $hsp_node->findvalue('Hsp_evalue');
+
+				my $hsp_align_len = $hsp_node->findvalue('Hsp_align-len');
+
+				#if (abs($hsp_align_len - $hit_len) > 10) { next } 
+
+				my $hsp_query_from 	= $hsp_node->findvalue('Hsp_query-from');
+				my $hsp_query_to	= $hsp_node->findvalue('Hsp_query-to');
+
+				my $hsp_hit_from	= $hsp_node->findvalue('Hsp_hit-from');
+				my $hsp_hit_to		= $hsp_node->findvalue('Hsp_hit-to');
+
+				my @hsp_query_seqid = ($hsp_query_from .. $hsp_query_to);
+				my @hsp_hit_seqid = ($hsp_hit_from .. $hsp_hit_to);
+
+				my $unused_query_coverage = region_coverage(\@hsp_query_seqid, \@unused_hit_seqid);	
+				my $unused_hit_coverage = region_coverage(\@hsp_hit_seqid, \@unused_query_seqid);
+
+				my $used_query_residues = residue_coverage(\@hsp_query_seqid, \@used_query_seqid);
+				my $used_hit_residues = residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+
+				print "$hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
+				#v1 5 used 5 unused
+				#v2 10 used 5 unused
+				if ($DEBUG) { 
+					print "DEBUG $hsp_evalue $used_hit_residues $used_query_residues\n";
+				}
+				if ($hsp_evalue < $HSP_EVALUE_THRESHOLD  && $used_hit_residues < 10 && $used_query_residues < 5) { 
+					#push (@tmp_query_segs, "$hsp_query_from-$hsp_query_to");
+					#push (@tmp_hit_segs, "$hsp_hit_from-$hsp_hit_to");
+					push (@tmp_evals, $hsp_evalue);
+					$hsp_count++;
+
+					$hit_align_len += $hsp_align_len;
+					#Assumes N-terminal extension of hit and query sequence in multi HSP hits
+					#This is very hacky, assumes much about quality of hsp overlap
+					$hsp_overlap += residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+#					if ($hsp_overlap > 0) { 
+#						my $before = rangify(@hsp_hit_seqid);
+#						my $before2 = rangify(@hsp_query_seqid);
+#						print "WARNING! hsp_overlap, $hsp_overlap\n";
+#						for (my $i = 0; $i < $hsp_overlap; $i++) { 
+#							my $removed_query = shift(@hsp_query_seqid);
+#							my $removed_hit = shift(@hsp_hit_seqid);
+#
+#							printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@hsp_query_seqid), scalar(@hsp_hit_seqid);
+#						}
+#						my $after = rangify(@hsp_hit_seqid);
+#						my $after2 = rangify(@hsp_query_seqid);
+#				
+#
+#					}
+					my $tmp_query_segs = rangify(@hsp_query_seqid);
+					my $tmp_hit_segs = rangify(@hsp_hit_seqid);
+
+					push (@tmp_query_segs, $tmp_query_segs);
+					push (@tmp_hit_segs, $tmp_hit_segs);
+					
+					range_include(\@hsp_query_seqid, \@used_query_seqid);
+					range_include(\@hsp_hit_seqid, \@used_hit_seqid);
+
+					range_exclude(\@hsp_query_seqid, \@unused_query_seqid);
+					range_exclude(\@hsp_hit_seqid, \@unused_hit_seqid);
+				}else{
+					#MARK
+					print "SKIP $hit_num $hsp_num $used_hit_residues $used_query_residues\n";
+				}
+			}
+
+			#if ( abs($hit_align_len - $hit_len) < 10){ #Why is this true?
+			if ( $hit_align_len / $hit_len > $HIT_COVERAGE_THRESHOLD ) { 
+
+				push (@hit_segs, @tmp_hit_segs);
+				push (@query_segs, @tmp_query_segs);
+				push (@evals, @tmp_evals);
+			}else{ 
+				if ($DEBUG) { 
+					print "hal $hit_align_len hl $hit_len\n";
+				}
+				next;
+			}
+
+
+			if (scalar(@query_segs) > 0) { 
+				my $bs_hit_node = $bs_doc->createElement('hit');
+
+				my %eval_map;
+				for (my $i = 0; $i < scalar(@hit_segs); $i++) { 
+					$eval_map{$hit_segs[$i]} = $evals[$i];
+				}
+
+				@hit_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @hit_segs;
+				@query_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @query_segs;
+				@evals = map {$_->[0]} sort {$a->[1] =~ /(\d+)\-/; my $anum = $1; $b->[1] =~ /(\d+)/; my $bnum = $1; $anum <=> $bnum} map { [$eval_map{$_}, $_]} @hit_segs;
+
+				if ($hsp_overlap > 0 && scalar(@hit_segs) == 2) { 
+					my $hit_seg = pop(@hit_segs);
+					my $hit_seg_aref = range_expand($hit_seg);
+					my $query_seg = pop(@query_segs);
+					my $query_seg_aref = range_expand($query_seg);
+
+					for (my $i = 0; $i < $hsp_overlap; $i++)  { 
+						my $removed_query = shift(@$query_seg_aref);
+						my $removed_hit = shift(@$hit_seg_aref);
+						#printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@$query_seg_aref), scalar(@$hit_seg_aref);
+					}
+					my $mod_hit_seg = rangify(@$hit_seg_aref);
+					my $mod_query_seg = rangify(@$query_seg_aref);
+					push (@query_segs, $mod_query_seg);
+					push (@hit_segs, $mod_hit_seg);
+				}
+
+				my $hit_query_reg = join(",", @query_segs);
+				my $hit_hit_reg	= join(',', @hit_segs);
+				my $hit_query_evals = join(",", @evals);
+				
+				if ($DEBUG) { 
+					print "$hit_num $hit_domain_id $hit_query_reg\n";
+				}
+				$bs_hit_node->setAttribute('num', $hit_num);
+				$bs_hit_node->setAttribute('domain_id', $hit_domain_id);
+				$bs_hit_node->setAttribute('pdb_id', $hit_pdb);
+				$bs_hit_node->setAttribute('chain_id', $hit_chain);
+				$bs_hit_node->setAttribute('hsp_count', $hsp_count);
+				$bs_hit_node->setAttribute('evalues', $hit_query_evals);
+				my $bs_query_reg_node = $bs_doc->createElement('query_reg');
+				$bs_query_reg_node->appendTextNode($hit_query_reg);
+				$bs_hit_node->appendChild($bs_query_reg_node);
+				my $bs_hit_reg_node = $bs_doc->createElement('hit_reg');
+				$bs_hit_reg_node->appendTextNode($hit_hit_reg);
+				$bs_hit_node->appendChild($bs_hit_reg_node);
+				$bs_hit_list_node->appendChild($bs_hit_node);
+			}
+		}
+	}
+}
+sub psiblast_process { 
+	my $sub = 'psiblast_process';
+
+	my ($psiblast_xml, $bs_node, $bs_doc) = @_;
+
+	if (!-f $psiblast_xml || -s $psiblast_xml == 0) { 
+		print "WARNING! $sub: PSI-BLAST xml result file $psiblast_xml not found, skipping...\n";
+		return 0;
+	}
+
+	my $xml_fh;
+	open ($xml_fh, $psiblast_xml) or die "Could not open $psiblast_xml for reading:$!\n";
+	my $psiblast_xml_doc = XML::LibXML->load_xml( IO => $xml_fh, load_ext_dtd => 0 );
+	close $xml_fh;
+
+#	my $blast_program = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_program');
+#	my $blast_version = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_version');
+#	my $blast_db	  = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_db');
+#	my $blast_query   = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-def');
+#	my $blast_query_len = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-len');
+
+	my $bs_run_node	= $bs_doc->createElement('blast_run');
+
+	my $blast_program = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_program');
+	$bs_run_node->setAttribute('program', $blast_program);
+
+	my $blast_version = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_version');
+	$bs_run_node->setAttribute('version', $blast_version);	
+
+	my $blast_db	  = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_db');
+	my $bs_db_node	= $bs_doc->createElement('blast_db');
+	$bs_db_node->appendTextNode($blast_db);
+
+	my $blast_query   = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-def');
+	my $bs_query_node	= $bs_doc->createElement('blast_query');
+	$bs_query_node->appendTextNode($blast_query);
+
+	my $blast_query_len = $psiblast_xml_doc->findvalue('//BlastOutput/BlastOutput_query-len');
+	my $bs_query_len_node	= $bs_doc->createElement('query_len');
+	$bs_query_len_node->appendTextNode($blast_query_len);
+
+	my $bs_hit_list_node	= $bs_doc->createElement('hits');
+
+	$bs_node->appendChild($bs_run_node);
+	$bs_run_node->appendChild($bs_db_node);
+	$bs_run_node->appendChild($bs_query_node);
+	$bs_run_node->appendChild($bs_query_len_node);
+	$bs_run_node->appendChild($bs_hit_list_node);
+	
+
+#	print "#$blast_program $blast_version $blast_db\n";
+#	print "#$blast_query $blast_query_len\n";
+
+	my $iteration_nodes = $psiblast_xml_doc->findnodes('//BlastOutput_iterations/Iteration');
+
+	my $num_iter_nodes = $iteration_nodes->size();
+	#use last
+
+	foreach my $iter_node ($iteration_nodes->get_nodelist() ) { 
+
+		my $iter_num 	= $iter_node->findvalue('Iteration_iter-num');
+		if ($iter_num != $num_iter_nodes) { next } 
+
+		my $iteration_hits_nodes = $iter_node->findnodes('Iteration_hits/Hit');
+		if ($DEBUG) { 
+			printf "DEBUG: $sub: Hits %i\n", $iteration_hits_nodes->size();
+		}
+
+
+		foreach my $hit_node ($iteration_hits_nodes->get_nodelist() ) { 
+
+			my $hit_num	= $hit_node->findvalue('Hit_num');
+
+			my $hit_def 	= $hit_node->findvalue('Hit_def');
+			my $hit_domain_id = 'NA';
+			if ($hit_def =~ /((d|g|e)\w{4}.{2})/) { 
+				$hit_domain_id = $1;
+			}
+			my $hit_hsps_nodes = $hit_node->findnodes('Hit_hsps/Hsp');
+
+			#if ($hit_hsps_nodes->size() > 1) { next } 
+
+			my @hit_segs;
+			my @query_segs;
+
+			my $hit_len	= $hit_node->findvalue('Hit_len');
+
+			my @evals;
+			my $hsp_count = 0;
+
+			my @unused_hit_seqid = (1 .. $hit_len);
+			my @unused_query_seqid = (1 .. $blast_query_len);
+
+			my @used_hit_seqid;
+			my @used_query_seqid;
+
+			my $hit_align_len = 0;
+
+			my @tmp_hit_segs;
+			my @tmp_query_segs;
+			my @tmp_evals;
+			foreach my $hsp_node ($hit_hsps_nodes->get_nodelist() ) { 
+
+				my $hsp_num	= $hsp_node->findvalue('Hsp_num');
+
+				my $hsp_evalue	= $hsp_node->findvalue('Hsp_evalue');
+
+				my $hsp_align_len = $hsp_node->findvalue('Hsp_align-len');
+
+				#if (abs($hsp_align_len - $hit_len) > 10) { next } 
+
+				my $hsp_query_from 	= $hsp_node->findvalue('Hsp_query-from');
+				my $hsp_query_to	= $hsp_node->findvalue('Hsp_query-to');
+
+				my $hsp_hit_from	= $hsp_node->findvalue('Hsp_hit-from');
+				my $hsp_hit_to		= $hsp_node->findvalue('Hsp_hit-to');
+
+				my @hsp_query_seqid = ($hsp_query_from .. $hsp_query_to);
+				my @hsp_hit_seqid = ($hsp_hit_from .. $hsp_hit_to);
+
+				my $unused_hit_coverage = region_coverage(\@hsp_query_seqid, \@unused_hit_seqid);	
+				my $unused_query_coverage = region_coverage(\@hsp_hit_seqid, \@unused_query_seqid);
+
+				my $used_hit_residues = residue_coverage(\@hsp_query_seqid, \@used_query_seqid);
+				my $used_query_residues = residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
+
+				#print "PSI $hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
+				if ($hsp_evalue < $HSP_EVALUE_THRESHOLD && $used_hit_residues < 10 && $used_query_residues < 5) { 
+					push (@tmp_query_segs, "$hsp_query_from-$hsp_query_to");
+					push (@tmp_hit_segs, "$hsp_hit_from-$hsp_hit_to");
+					push (@evals, $hsp_evalue);
+					$hsp_count++;
+
+					$hit_align_len += $hsp_align_len;
+
+					range_include(\@hsp_query_seqid, \@used_query_seqid);
+					range_include(\@hsp_hit_seqid, \@used_hit_seqid);
+
+					range_exclude(\@hsp_query_seqid, \@unused_query_seqid);
+					range_exclude(\@hsp_hit_seqid, \@unused_hit_seqid);
+
+				}
+			}
+			if ( abs($hit_align_len - $hit_len) < 10) { 
+				push (@hit_segs, @tmp_hit_segs);
+				push (@query_segs, @tmp_query_segs);
+				push (@evals, @tmp_evals);
+			}else{
+				next;
+			}
+			
+			if (scalar(@query_segs) > 0) { 
+				my $bs_hit_node = $bs_doc->createElement('hit');
+
+				my %eval_map;
+				for (my $i = 0; $i < scalar(@hit_segs); $i++) { 
+					$eval_map{$hit_segs[$i]} = $evals[$i];
+				}
+
+				@hit_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @hit_segs;
+				@query_segs = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @query_segs;
+				@evals = map {$_->[0]} sort {$a->[1] =~ /(\d+)\-/; my $anum = $1; $b->[1] =~ /(\d+)/; my $bnum = $1; $anum <=> $bnum} map { [$eval_map{$_}, $_]} @hit_segs;
+
+				my $hit_query_reg = join(",", @query_segs);
+				my $hit_hit_reg	= join(',', @hit_segs);
+				my $hit_query_evals = join(",", @evals);
+				
+				if ($DEBUG) { 
+					print "$hit_num $hit_domain_id $hit_query_reg\n";
+				}
+				$bs_hit_node->setAttribute('num', $hit_num);
+				$bs_hit_node->setAttribute('domain_id', $hit_domain_id);
+				$bs_hit_node->setAttribute('hsp_count', $hsp_count);
+				$bs_hit_node->setAttribute('evalues', $hit_query_evals);
+				my $bs_query_reg_node = $bs_doc->createElement('query_reg');
+				$bs_query_reg_node->appendTextNode($hit_query_reg);
+				$bs_hit_node->appendChild($bs_query_reg_node);
+				my $bs_hit_reg_node = $bs_doc->createElement('hit_reg');
+				$bs_hit_reg_node->appendTextNode($hit_hit_reg);
+				$bs_hit_node->appendChild($bs_hit_reg_node);
+				$bs_hit_list_node->appendChild($bs_hit_node);
+			}
+		}
+	}
+}
+
+
+sub hhsearch_process_v2 { 
+	my $sub = 'hhsearch_process_v2';
+
+	my ($hhsearch_fn, $bs_node, $bs_doc) = @_;
+
+	if (!-f $hhsearch_fn || -s $hhsearch_fn == 0) { 
+		print "WARNING! $sub: HHsearch parse file $hhsearch_fn not found, skipping...\n";
+		return 0;
+	}
+	my $hh_run_node	= $bs_doc->createElement('hh_run');
+	$hh_run_node->setAttribute('program', 'hhsearch');
+
+	$hh_run_node->setAttribute('db', 'hora_full');
+	my $hh_hit_list_node = $bs_doc->createElement('hits');
+	$hh_run_node->appendChild($hh_hit_list_node);
+	$bs_node->appendChild($hh_run_node);
+
+
+	my $xml_fh;
+	open ($xml_fh, $hhsearch_fn) or die "Could not open $hhsearch_fn for reading:$!\n";
+	my $hh_doc = XML::LibXML->load_xml( IO => $xml_fh );
+
+	my $hd_hit_nodes = $hh_doc->findnodes('//hh_summ_doc/hh_hit_list/hh_hit');
+	my $hit_num = 1;
+	foreach my $node ($hd_hit_nodes->get_nodelist() )  {
+
+		my $hh_hit_node = $bs_doc->createElement('hit');
+		if ($node->findvalue('@structure_obsolete') eq 'true') { 
+			next;
+		}
+		#if ($node->findvalue('@low_coverage_hit') eq 'true') { 
+		#	next;
+		#}
+
+		my $hit_domain_id	= $node->findvalue('@ecod_domain_id');
+		$hh_hit_node->setAttribute('domain_id', $hit_domain_id);
+		$hh_hit_node->setAttribute('num', $hit_num);
+		my $hh_prob	= $node->findvalue('@hh_prob');
+		$hh_hit_node->setAttribute('hh_prob', $hh_prob);
+		my $hh_score 	= $node->findvalue('@hh_score');
+		$hh_hit_node->setAttribute('hh_score', $hh_score);
+
+		#my $query_struct_seqid = $node->findvalue('query_seqid_range');
+		my $query_struct_seqid = $node->findvalue('query_range');
+		my $query_reg_node = $bs_doc->createElement('query_reg');
+		$query_reg_node->appendTextNode($query_struct_seqid);
+		$hh_hit_node->appendChild($query_reg_node);
+
+		
+		my $hit_struct_seqid	= $node->findvalue('template_seqid_range');
+		my $hit_reg_node = $bs_doc->createElement('hit_reg');
+		$hit_reg_node->appendTextNode($hit_struct_seqid);
+		$hh_hit_node->appendChild($hit_reg_node);
+
+		#my $hit_cover	= $node->findvalue('template_seqid_range/@coverage');
+		my $hit_cover	= $node->findvalue('template_seqid_range/@ungapped_coverage');
+		$hh_hit_node->setAttribute('hit_cover', $hit_cover);
+
+		$hh_hit_list_node->appendChild($hh_hit_node);
+
+		$hit_num++;
+
+	}
+	close $xml_fh;
+}	
+	
+	
+
+
+
 
 sub load_partition_vars {
     $DOMAIN_PREFIX = 'domains_v13';
@@ -141,7 +1733,7 @@ sub struct_search_dali_query_gen {
         my ( $uid, $ecod_domain_id ) = get_ids($rep_domain_node);
         my $short_uid = substr( $uid, 2, 5 );
 
-        next if isObsolete($rep_domain_node);
+        next if is_obsolete($rep_domain_node);
 
         if ( $rep_domain_node->findvalue('structure/@structure_obsolete') eq 'true' ) {
             next;
@@ -263,10 +1855,10 @@ sub jobify_dali {
     my $job_file = $dali_output_fn;
     $job_file =~ s/dali/job/;
 
-    $pdb1_fn =~ /\/([\d\w\_\-\.]+)\.pdb/;
+    $pdb1_fn =~ /\/([\d\w\_\-\.]+)\.(pdb|ent)/;
     my $name1 = $1;
 
-    $pdb2_fn =~ /\/([\d\w\.]+)\.pdb/;
+    $pdb2_fn =~ /\/([\d\w\.]+)\.(pdb|ent)/;
     my $name2 = $1;
     my $mixup = $name1 . "_" . $name2;
 
@@ -278,6 +1870,11 @@ sub jobify_dali {
     print $fh "#\$ -j y\n";
     print $fh "#\$ -M dustin.schaeffer\@gmail.com\n";
     print $fh "#\$ -v LD_LIBRARY_PATH\n";
+	my $who = `whoami`;
+	print $fh "#who $who\n";
+	if (`whoami` eq "apache\n") { 
+		print $fh "source ~/.bash_profile";
+	}
     print $fh "mkdir $dali_dir/$mixup\n";
     print $fh "cd $dali_dir/$mixup\n";
     print $fh "$DALI_EXE -pairwise $pdb1_fn $pdb2_fn > /dev/null\n";
@@ -2454,8 +4051,13 @@ sub hh_parse {
     my %seqid_range;
     my %ecod_domain_id;
     my %uid_lookup;
-
-    my $ref_xml_doc = xml_open( $REF_XML{$reference} );
+	
+	my $ref_xml_doc;
+	if (-f $REF_XML{$reference}) { 
+		$ref_xml_doc = xml_open( $REF_XML{$reference} );
+	}else{
+		die "ERROR! No reference for $reference\n";
+	}
 
     foreach my $ref_node ( find_manual_domain_nodes($ref_xml_doc) ) {
 
@@ -3514,7 +5116,7 @@ sub build_rep_stats {
         my ( $uid, $ecod_domain_id ) = get_ids($rep_node);
         my $short_uid = substr( $uid, 2, 5 );
 
-        next if isObsolete($rep_node);
+        next if is_obsolete($rep_node);
 
         my $seqid_range = get_seqid_range($rep_node);
 
@@ -3731,7 +5333,7 @@ sub run_list_maintain {
             my $job_id = 0;
             for ( my $i = 0 ; $i < scalar(@new_pdbs) ; $i++ ) {
                 my $pdb        = $new_pdbs[$i];
-                my $chain_aref = pdbml_fetch_chains($pdb);
+                my $chain_aref = pdbml_quick_fetch_chains($pdb);
 
                 for ( my $j = 0 ; $j < scalar(@$chain_aref) ; $j++ ) {
                     my $chain = $$chain_aref[$j];
@@ -5556,6 +7158,8 @@ sub define_coils {
 sub find_hhsearch_domains {
     my $sub = 'find_hhsearch_domains';
 
+	my $ASSIGN_FRAGMENTS = 0;
+
     my (
         $blast_summ_xml_doc, $domain_xml_doc,          $ref_chain_domains, $ref_domain_uid_lookup,
         $ref_range_cache,    $query_struct_seqid_aref, $query_seqid_aref,  $query_pdbnum_aref,
@@ -5577,7 +7181,7 @@ sub find_hhsearch_domains {
     my $hhsearch_run_nodes      = $blast_summ_xml_doc->findnodes($hhsearch_run_XPath);
     my $hhsearch_run_nodes_size = $hhsearch_run_nodes->size();
     if ( $hhsearch_run_nodes_size > 1 ) {
-        print "ERROR! $sub: Odd number of hhsearch run nodies found {$hhsearch_run_nodes_size), aborting...\n";
+        print "ERROR! $sub: Odd number of hhsearch run nodes found {$hhsearch_run_nodes_size), aborting...\n";
     }
 
     if ( $hhsearch_run_nodes_size == 1 ) {
@@ -5598,8 +7202,12 @@ sub find_hhsearch_domains {
             }
 
             if ( $hit_node->findvalue('@hit_cover') < $$global_opt{hit_coverage_threshold} ) {    #what
-                print "Skipping $hit_num $hit_domain_id $$global_opt{hit_coverage_threshold}\n";
-                next;
+				if ($ASSIGN_FRAGMENTS) { 
+					$hit_node->setAttribute('fragment', 'true');
+				}else{
+					print "Skipping $hit_num $hit_domain_id $$global_opt{hit_coverage_threshold}\n";
+					next;
+				}
             }
 
             my $hh_prob  = $hit_node->findvalue('@hh_prob');
@@ -5720,6 +7328,8 @@ sub find_hhsearch_domains {
                 $hh_score_node->setAttribute( 'hh_prob',  $hh_prob );
                 $hh_score_node->setAttribute( 'hh_score', $hh_score );
                 $domain_node->appendChild($hh_score_node);
+
+				$hit_node->findvalue('@fragment') eq 'true' and $hh_score_node->setAttribute('fragment', 'true');
 
                 $domain_list_node->appendChild($domain_node);
 
@@ -6296,7 +7906,8 @@ sub find_domainwise_blast_domains {
         my $unused_coverage = region_coverage( $query_struct_seqid_aref, $unused_seq_aref );
         my $used_coverage   = region_coverage( $query_struct_seqid_aref, $used_seq_aref );
 
-        if ( $unused_coverage < 0.05 || scalar(@$unused_seq_aref) < 10 ) {
+        #if ( $unused_coverage < 0.05 || scalar(@$unused_seq_aref) < 20 ) {
+        if (  scalar(@$unused_seq_aref) < 20 ) {
             last;
         }
 
@@ -6472,7 +8083,9 @@ sub find_domainwise_blast_domains {
 
                 }
             }
-        }
+        }else{
+			print "NOPE: quc: $query_used_coverage qnc: $query_new_coverage\n";
+		}
     }
 }
 
@@ -6915,6 +8528,7 @@ sub generate_dali_fillin {
     }
 
     #dali_summ
+	printf "dsc: %s %s %s %s\n", $query_pdb, $query_asym_id, $query_chain, rangify(@$query_seqid_aref);
 
     my $query_seq_href = pdbml_seq_fetch( $query_pdb, $query_asym_id, $query_chain, $query_seqid_aref );
 
@@ -6925,6 +8539,7 @@ sub generate_dali_fillin {
     $query{struct_seqid_aref} = $query_struct_seqid_aref;
     $query{pdbnum_aref}       = $query_pdbnum_aref;
     $query{seq}               = $query_seq_href;
+	print "dsc2: $query_pdb, $query_chain, $query_seq_href\n";
 
     dali_summ( \@files, $dali_fillin_summ_fn, \%query, \%hit_stats );
 

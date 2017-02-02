@@ -10,6 +10,7 @@ use Carp;
 our @ISA = qw(Exporter);
 our @EXPORT = (
 		"&qsub",
+		"&qsub_hold",
 		"&qsub_fast",
 		"&job_create", 
 		"&qstat_wait_list", 
@@ -30,12 +31,17 @@ sub qsub {
 	my $sub = 'qsub';
 
 	my $job_file = shift @_;
+	my $orte = shift;
 	#if (!-f $job_file){ 
 	#	die "ERROR! $sub: $job_file not found\n";
 	#}
 
-	#my $output = `qsub -terse -pe orte 8 $job_file`; #Use -terse for better parsing.
-	my $output = `qsub -terse $job_file`; #Use -terse for better parsing.
+	my $output;
+	if ($orte) { 
+		$output = `qsub -terse -pe orte 8 $job_file`; #Use -terse for better parsing.
+	}else{
+		$output = `qsub -terse $job_file`; #Use -terse for better parsing.
+	}
 
 	my $job_id;
 	if ($output =~ /(\d+)/) { 
@@ -45,6 +51,28 @@ sub qsub {
 		print "ERROR $sub: $output\n";
 		return 0;
 	}
+}
+sub qsub_hold { 
+	my $sub = 'qsub_hold';
+	my $job_file = shift;
+	my $hold_jid = shift;
+	my $orte 	= shift;
+	my $output;
+	if ($orte) { 
+		$output = `qsub -terse -hold_jid $hold_jid -pe orte 8 $job_file`, 
+	}else{
+		$output = `qsub -terse -hold_jid $hold_jid $job_file`;
+	}
+		
+	my $job_id;
+	if ($output =~ /(\d+)/) { 
+		$job_id = $1;
+		return $job_id;
+	}else{
+		print "ERROR $sub: $output\n";
+		return 0;
+	}
+
 }
 sub throttled_qsub { 
 	my $sub = 'throttled_qsub';

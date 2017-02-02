@@ -7,14 +7,19 @@ use strict;
 use XML::LibXML;
 use XML::LibXML::Reader;
 
+use Domains::Range;
+
 
 our @ISA = qw(Exporter);
 our @EXPORT = 
-	("&pdbml_annot_parse", 
+	(
+	"&get_ppss_seq_ids",
+	"&pdbml_annot_parse", 
 	"&pdbml_date_method",
 	 "&pdbml_entity_poly",
 	 "&pdbml_doc_seq_parse",
 	 "&pdbml_fetch_chains",
+	 "&pdbml_quick_fetch_chains",
 	"&pdbml_seq_parse",
 	"&pdbml_obs_seq_parse",
 	"&pdbml_mc_seq_parse",
@@ -40,8 +45,90 @@ my $pdb_atom_top_dir = '/usr2/pdb/data/structures/divided/XML';
 (-d $pdb_atom_top_dir) or die "Could not find pdb top dir: $pdb_atom_top_dir\n";
 #my $pdb_cache_top_dir = '/home/rschaeff_1/pdb_junk_bin';
 #(-d $pdb_cache_top_dir) or die "Coudl not find pdb cache dir: $pdb_cache_top_dir\n";
-
+sub get_ppss_seq_ids { 
+	($_[0]->findvalue('@seq_id'),
+		$_[0]->findvalue('PDBx:auth_seq_num'),
+		$_[0]->findvalue('PDBx:pdb_seq_num'));
+}
 sub pdbml_fetch_chains { 
+        my $sub = 'pdbml_fetch_chains';
+        my $pdb = shift (@_);
+
+        if ($DEBUG) { 
+                print "DEBUG $sub: $pdb\n";
+        }
+        chomp $pdb;
+
+        my $pdbml = pdbml_load($pdb);
+
+        my $entity_poly_XPath = '//PDBx:entity_polyCategory/PDBx:entity_poly';
+
+        my @chains;
+		my %types;
+        foreach my $ep_node ($pdbml->findnodes($entity_poly_XPath)->get_nodelist()) { 
+
+			my $type = $ep_node->findvalue('PDBx:type');
+			my $entity_id = $ep_node->findvalue('@entity_id');
+
+			if ($type ne 'polypeptide(L)') { next } 
+
+			my $strand_string = $ep_node->findvalue('PDBx:pdbx_strand_id');
+			#print "s:$strand_string\n";
+			my @strands = split(/,\s?/, $strand_string);
+			push (@chains, @strands);
+			foreach my $strand (@strands) { 
+				$types{$strand} = $type;
+			}
+        }
+
+	my $pdbx_poly_seq_schemeCategoryXPath = "//PDBx:pdbx_poly_seq_schemeCategory/PDBx:pdbx_poly_seq_scheme";
+	my $pdbx_poly_seq_scheme_nodes = $pdbml->findnodes($pdbx_poly_seq_schemeCategoryXPath);
+
+	my @seq_ids;
+	my %seq_ids;
+	my %seen_seq_ids;
+	my %struct_seq_ids;
+	my %pdb_seq_nums;
+
+	foreach my $node ($pdbx_poly_seq_scheme_nodes->get_nodelist() ) { 
+
+		my $seq_id	= $node->findvalue('@seq_id');
+		my $asym_id	= $node->findvalue('@asym_id');
+
+		my $auth_seq_num	= $node->findvalue('PDBx:auth_seq_num');
+		my $pdb_seq_num		= $node->findvalue('PDBx:pdb_seq_num');
+		
+		my $hetero		= $node->findvalue('PDBx:hetero');
+
+		my $strand_id 	= $node->findvalue('PDBx:pdb_strand_id');
+
+		if ($seen_seq_ids{$strand_id}{$seq_id}) { 
+			print "WARNING! $sub: duplicate seq id $seq_id in asym_id $asym_id\n";
+			next;
+		}else{
+			$seen_seq_ids{$strand_id}{$seq_id}++;
+		}
+		my $pdb_ins_code;
+		if ($node->findvalue('PDBx:pdb_ins_code/@xsi:nil') ne 'true') { 
+			$pdb_ins_code = $node->findvalue('PDBx:pdb_ins_code');
+		}
+		if (defined $pdb_seq_num) { 
+			if ($pdb_ins_code) { 
+				$pdb_seq_nums{$strand_id}[$seq_id] = $pdb_seq_num . $pdb_ins_code;
+			}else{
+				$pdb_seq_nums{$strand_id}[$seq_id] = $pdb_seq_num;
+			}
+		}
+		if ($auth_seq_num =~ /\d+/) { 
+			push (@{$struct_seq_ids{$strand_id}}, $seq_id);
+		}
+		push (@{$seq_ids{$strand_id}}, $seq_id);
+
+	}
+
+        return (\@chains, \%seq_ids, \%struct_seq_ids, \%pdb_seq_nums, \%types);
+}
+sub pdbml_quick_fetch_chains { 
 	my $sub = 'fetch_chains';
 	my $pdb = shift (@_);
 
@@ -995,9 +1082,8 @@ sub pdbml_seq_fetch  {
 
 	my ( $pdb4, $asym_id, $chain, $seqid_aref ) = @_;
 
+
 	$pdb4 = lc($pdb4);
-	#$chain = uc($chain);
-	$chain = $chain;
 	my $two;
 	if ($pdb4 =~ /\w(\w{2})\w/) { 
 		$two = $1;
@@ -1007,7 +1093,7 @@ sub pdbml_seq_fetch  {
 	}
 
 	if ($DEBUG) { 
-		print "DEBUG $sub: $pdb4 $chain\n";
+		printf "DEBUG $sub: $pdb4 $chain $asym_id %s\n", rangify(@$seqid_aref);
 	}
 
 	if (!$seqid_aref || scalar(@$seqid_aref) == 0) { 
@@ -1024,9 +1110,12 @@ sub pdbml_seq_fetch  {
 		my $entity_poly_nodes	= $pdbml->findnodes($entity_poly_XPath);
 		foreach my $node ($entity_poly_nodes->get_nodelist() ) { 
 			my $chain_str = $node->findvalue('PDBx:pdbx_strand_id');
-			if ($chain_str =~ /$chain/) { 
-				$entity_id = $node->findvalue('@entity_id');
-				last;
+			my @chains = split(/\,/, $chain_str);
+			foreach my $local_chain (@chains) { 
+				if ($local_chain eq $chain) { 
+					$entity_id = $node->findvalue('@entity_id');
+					last;
+				}
 			}
 		}
 	}else{
@@ -1071,6 +1160,7 @@ sub pdbml_seq_fetch  {
 	my $pdbx_poly_seq_schemeCategoryXPath = qq{//PDBx:pdbx_poly_seq_schemeCategory/PDBx:pdbx_poly_seq_scheme[\@entity_id='$entity_id'][\@asym_id='$asym_id']};
 	my $pdbx_poly_seq_scheme_nodes = $pdbml->findnodes($pdbx_poly_seq_schemeCategoryXPath);
 
+
 	my %three_to_one = (
 				ALA 	=> 'A',
 				CYS 	=> 'C',
@@ -1113,16 +1203,17 @@ sub pdbml_seq_fetch  {
 
 			if ($DEBUG) { 
 				print "DEBUG $sub: $seq_id $mon_id $one_letter_aa\n";
+				printf "???%i %i\n", scalar keys %seq, scalar(keys %seq);
 			}
 
-			#push (@seq, $one_letter_aa);
 			$seq{$seq_id} = $mon_id
 					
 		}
 	}
+	printf "%i\n", scalar(keys %seq);
 
 	if (scalar(keys %seq) == 0) { 
-		print "WARNING! $sub: No sequence found for $pdb4, $chain\n";
+		print "WARNING! $sub: No sequence found for $pdb4, $chain, $asym_id\n";
 		return 0;
 	}
 
@@ -1325,7 +1416,7 @@ sub pdbml_fasta_fetch {
 	}
 	$pdb4 = lc($pdb4);
 	#$chain = uc($chain);
-	$chain = $chain;
+	#$chain = $chain;
 	if ($DEBUG) { 
 		print "DEBUG $sub: $pdb4 $chain\n";
 	}
@@ -1356,6 +1447,7 @@ sub pdbml_fasta_fetch {
 		die "ERROR $sub: chain $chain entity id not found in $pdb4\n";
 	}
 
+	#print "e: $entity_id\n";
 
 	#This is an absolutely terrible way to do this, use pdbx_poly_seq_scheme NOT entity_poly_seq
 	
@@ -1429,13 +1521,24 @@ sub pdbml_fasta_fetch {
 	my @seq;
 	my %seq_ids;
 
+	my %search_seqids;
+	foreach my $seq_id (@$seqid_aref) { 
+		$search_seqids{$seq_id}++;
+	}
+
+	my ($c1, $c2, $c3);
+	$c1 = 0; $c2 = 0; $c3 = 0;
 	foreach my $node ($pdbx_poly_seq_scheme_nodes->get_nodelist() ) { 
 		my $strand_id	= $node->findvalue('PDBx:pdb_strand_id');
-		if ($strand_id ne $chain) { next } 
+		if ($strand_id ne $chain) { 
+			$c1++; 
+			next;
+		} 
 		my $seq_id 	= $node->findvalue('@seq_id');
 		my $mon_id	= $node->findvalue('@mon_id');
 
 		if ($seq_ids{$seq_id}) { 
+			$c2++;
 			next;
 		}else{
 			$seq_ids{$seq_id}++;
@@ -1443,7 +1546,7 @@ sub pdbml_fasta_fetch {
 
 		my $auth_seq_num	= $node->findvalue("PDBx:auth_seq_num");
 
-		if (grep {$seq_id == $_} @$seqid_aref) { 
+		if ($search_seqids{$seq_id}) { 
 			my $one_letter_aa;
 			if ($three_to_one{$mon_id}) { 
 				$one_letter_aa	= $three_to_one{$mon_id};
@@ -1452,6 +1555,7 @@ sub pdbml_fasta_fetch {
 			}else{
 				$one_letter_aa	= 'X';
 				#die "ERROR! $sub: No one letter abbreviation for mon_id $mon_id\n";
+				warn "ERROR! $sub: No abbrev for mon_id $mon_id\n";
 			}
 
 			if ($DEBUG) { 
@@ -1459,13 +1563,13 @@ sub pdbml_fasta_fetch {
 			}
 
 			push (@seq, $one_letter_aa);
-					
-					
+		}else{
+			$c3++;
 		}
 	}
 
 	if (scalar(@seq) == 0) { 
-		print "WARNING! $sub: No sequence found for $pdb4, $chain\n";
+		print "WARNING! $sub: No sequence found for $pdb4, $chain ($c1, $c2, $c3)\n";
 		return 0;
 	}
 

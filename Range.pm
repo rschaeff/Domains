@@ -644,7 +644,8 @@ sub multi_chain_pdb_range_expand {
 				push (@chain, $chain);
 			}
 		}else{ 
-			die "ERROR! $sub: seg $seg\n";
+			warn "WARNING! $sub: seg $seg\n";
+			return 0;
 		}
 	}
 	return (\@range, \@chain);
@@ -1194,7 +1195,7 @@ sub multi_chain_ungap_range {
 				my $chain2 = $1;
 				my $start2 = $2;
 				my $end2 = $3;
-				if ($solo_chain1 eq $chain2 && abs($solo1 - $end2) < $GAP_TOL) { 
+				if ($solo_chain1 eq $chain2 && abs($solo1 - $start2) < $GAP_TOL) { 
 					splice(@segs, $i, 2, "$chain2:$solo1-$end2");
 				}else{
 					$i++;

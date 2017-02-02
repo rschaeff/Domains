@@ -192,10 +192,15 @@ sub dali_summ {
 
 				#Calculate BLOSUM score from bits matrix 
 
-				my $ref_seq_href = seq_grab($ref_range_aref, $$query_href{seq});
+				my $ref_seq_href;
+				if (exists $$query_href{seq} && $$query_href{seq} != 0) { 
+					$ref_seq_href = seq_grab($ref_range_aref, $$query_href{seq});
+				}else{
+					die "ERROR! No seq_href \n";
+				}
 
 				my $mob_seq_href;
-				if( exists $$rep_stats{$hit_uid}{seq}){
+				if( exists $$rep_stats{$hit_uid}{seq} && $$rep_stats{$hit_uid}{seq} != 0){
 					$mob_seq_href = seq_grab($mob_range_aref, $$rep_stats{$hit_uid}{seq});
 					#printf "keys mobseq %i\n", keys %$mob_seq_href;
 				}else{
