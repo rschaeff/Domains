@@ -1869,12 +1869,11 @@ sub jobify_dali {
     print $fh "#\$ -cwd \n";
     print $fh "#\$ -j y\n";
     print $fh "#\$ -M dustin.schaeffer\@gmail.com\n";
-    print $fh "#\$ -v LD_LIBRARY_PATH\n";
-	my $who = `whoami`;
-	print $fh "#who $who\n";
 	if (`whoami` eq "apache\n") { 
-		print $fh "source ~/.bash_profile";
+		print $fh "#\$ -S /bin/bash\n";
 	}
+    print $fh "#\$ -v LD_LIBRARY_PATH\n";
+	
     print $fh "mkdir $dali_dir/$mixup\n";
     print $fh "cd $dali_dir/$mixup\n";
     print $fh "$DALI_EXE -pairwise $pdb1_fn $pdb2_fn > /dev/null\n";
