@@ -24,6 +24,7 @@ our @EXPORT =
 	"&pdbml_obs_seq_parse",
 	"&pdbml_mc_seq_parse",
 	"&pdbml_coord_parse",
+	"&pdbml_coord_residue_set_parse_pull",
 	"&pdbml_coord_ligand_parse_pull",
 	"&pdbml_coord_parse_pull",
 	"&pdbml_mc_coord_parse_pull",
@@ -405,10 +406,11 @@ $record, $atom_number, $atom, $alt_id, $residue, $chain, $residue_number, $ins_c
 	return 1;
 	
 }
-sub pdbml_coord_ligand_parse_pull { 
+
+sub pdbml_coord_residue_set_parse_pull { 
 	my $sub = (caller(0))[3];
 
-	my ($pdb4, $non_poly_chem_comp_ids_href) = @_;
+	my ($pdb4, $coord_lookup_href) = @_;
 
 	$pdb4 = lc($pdb4);
 	my $two;
@@ -425,6 +427,151 @@ sub pdbml_coord_ligand_parse_pull {
 			warn "ERROR! $sub: Could not open $pdb_fn for reading:$!\n";
 			return 0;
 		}
+	}else{
+		warn "ERROR! $sub: Could not find $pdb_fn\n";
+		return 0;
+	}
+
+	my $pdbml_pull	= new XML::LibXML::Reader(IO => $xml_fh) or
+		die "ERROR $sub: Cannot read $pdb_atom_top_dir/$two/$pdb4.xml\n";
+
+	my @atom_site;
+	my $default_model_num = 1;
+
+	my $i = 0;
+	my $start = 0;
+	$pdbml_pull->nextElement("PDBx:atom_site");	
+	
+	while (($i == 0 && $start == 0) || $pdbml_pull->nextSibling()) {
+		$start++;
+
+		my $depth 	= $pdbml_pull->depth;
+		my $nodeType	= $pdbml_pull->nodeType;
+		my $name	= $pdbml_pull->name;
+		my $isempty	= $pdbml_pull->isEmptyElement;
+		if ($nodeType == 14) { #NODE_TYPE 14 SIGNIFICANT WHITESPACE
+			$start = 1;
+			next;
+		}
+		my $text 	= 'NA';
+		if ($pdbml_pull->hasValue) { 
+			$text = $pdbml_pull->value;
+		}
+
+		if ($DEBUG > 2) { 
+			print "DEBUG $sub: $depth $nodeType $name $isempty $text\n";
+		}
+
+		my $node = $pdbml_pull->copyCurrentNode(1);
+
+		my $atom_site_id	= $node->findvalue('@id');
+
+		if ($DEBUG > 2) { 
+			print "DEBUG $sub: atom_site_id $atom_site_id\n";
+		}
+
+		my $label_comp_id	= $node->findvalue('PDBx:label_comp_id');
+		my $label_seq_id	= $node->findvalue('PDBx:label_seq_id');
+		my $label_asym_id	= $node->findvalue('PDBx:label_asym_id');
+
+		my $auth_seq_id		= $node->findvalue('PDBx:auth_seq_id');
+
+		#print "?? $label_asym_id $label_seq_id\n";
+
+		if ($$coord_lookup_href{$label_asym_id}{$auth_seq_id}) { 
+			my $B_iso_or_equiv	= $node->findvalue('PDBx:B_iso_or_equiv');
+
+			#Coords
+			my $Cartn_x	= $node->findvalue('PDBx:Cartn_x');
+			my $Cartn_y	= $node->findvalue('PDBx:Cartn_y');
+			my $Cartn_z	= $node->findvalue('PDBx:Cartn_z');
+
+			#Residue indices
+			my $label_asym_id	= $node->findvalue('PDBx:label_asym_id');
+			my $label_atom_id	= $node->findvalue('PDBx:label_atom_id');
+			my $label_seq_id	= $node->findvalue('PDBx:label_seq_id');
+
+		#	my $auth_seq_id		= $node->findvalue('PDBx:auth_seq_id'); # Not sure this is necessarily the same as pdb seq num :(
+			my $auth_asym_id	= $node->findvalue('PDBx:auth_asym_id');
+
+			#print "??$label_comp_id $label_asym_id $label_seq_id $auth_asym_id $auth_seq_id\n";
+
+			#occupancy
+			my $occupancy	= $node->findvalue('PDBx:occupancy');
+
+			#B-Factor
+			my $bfactor	= $node->findvalue('PDBx:B_iso_or_equiv');
+
+			#insertion code
+			my $pdbx_PDB_ins_code;
+			if ($node->exists('PDBx:pdbx_PDB_ins_code')) { 
+				$pdbx_PDB_ins_code = $node->findvalue('PDBx:pdbx_PDB_ins_code');
+			}
+			#alt_id 
+			my $label_alt_id;
+			if ($node->exists('PDBx:label_alt_id')) { 
+				$label_alt_id	= $node->findvalue('PDBx:label_alt_id');
+			}
+
+			if ($DEBUG > 2) { 
+				print "DEBUG $sub: label_asym_id $label_asym_id\n";
+			}
+			#model num
+			my $pdbx_PDB_model_num = $node->findvalue('PDBx:pdbx_PDB_model_num');
+			if ($pdbx_PDB_model_num && $pdbx_PDB_model_num != $default_model_num) { $start = 1; next } 
+
+			$atom_site[$i]{atom_site_id}	= $atom_site_id;
+
+			$atom_site[$i]{Cartn_x}	= $Cartn_x;
+			$atom_site[$i]{Cartn_y}	= $Cartn_y;
+			$atom_site[$i]{Cartn_z}	= $Cartn_z;
+
+			$atom_site[$i]{occupancy}	= $occupancy;
+			$atom_site[$i]{bfactor}		= $bfactor;
+
+			$atom_site[$i]{label_asym_id}	= $label_asym_id;
+			$atom_site[$i]{label_atom_id}	= $label_atom_id;
+			$atom_site[$i]{label_comp_id}	= $label_comp_id;
+			$atom_site[$i]{label_seq_id}	= $label_seq_id;
+
+			$atom_site[$i]{auth_seq_id}	= $auth_seq_id;
+			$atom_site[$i]{auth_asym_id}	= $auth_asym_id;
+
+			$atom_site[$i]{ins_code}	= $pdbx_PDB_ins_code;
+			$atom_site[$i]{alt_id}		= $label_alt_id;
+			$atom_site[$i]{model_num}	= $pdbx_PDB_model_num;
+			$i++;
+		}
+	}
+	return \@atom_site;
+}
+sub pdbml_coord_ligand_parse_pull { 
+	my $sub = (caller(0))[3];
+
+	my ($pdb4, $non_poly_chem_comp_ids_href) = @_;
+
+	$pdb4 = lc($pdb4);
+	my $two;
+	if ($pdb4 =~ /\w(\w{2})\w/) { 
+		$two = $1;
+	}else{
+		die "ERROR! $sub: REGEXP fail on $pdb4\n";
+	}
+
+	my $xml_fh;
+	my $pdb_fn = "$pdb_atom_top_dir/$two/$pdb4.xml.gz";
+	my $pdb_obs_fn = "$pdb_obs_top_dir/$two/$pdb4.xml.gz";
+	if (-f $pdb_fn) { 
+		if (!open ($xml_fh, "gzip -dc $pdb_fn |") ) { 
+			warn "ERROR! $sub: Could not open $pdb_fn for reading:$!\n";
+			return 0;
+		}
+	}elsif(-f $pdb_obs_fn) { 	
+		if (!open ($xml_fh, "gzip -dc $pdb_obs_fn |") ) { 
+			warn "ERROR! $sub: Could not open $pdb_obs_fn for reading:$!\n";
+			return 0;
+		}
+		
 	}else{
 		warn "ERROR! $sub: Could not find $pdb_fn\n";
 		return 0;
@@ -579,14 +726,14 @@ sub pdbml_coord_parse_pull {
 			}
 		}
 	}elsif(-f  "$pdb_obs_top_dir/$two/$pdb4.xml.gz") { 
-		if (!open ($xml_fh, "gzip -dc $pdb_obs_top_dir/$two/$pdb4.xml.gz |") ) { 
+		if (!open ($xml_fh, "gzip -dc $pdb_obs_top_dir/$two/$pdb4.xml |") ) { 
 			my $i = 0;
-			while (!open ($xml_fh, "gzip -dc $pdb_obs_top_dir/$two/$pdb4.xml.gz |") && $i < $MAX_FILE_ATTEMPTS ) { 
+			while (!open ($xml_fh, "gzip -dc $pdb_obs_top_dir/$two/$pdb4.xml |") && $i < $MAX_FILE_ATTEMPTS ) { 
 				sleep(1);
 				$i++;
 			}
 			if ($i == $MAX_FILE_ATTEMPTS) {
-				die "ERROR $sub: Could not open $pdb_obs_top_dir/$two/$pdb4.xml.gz for reading:$!\n";
+				die "ERROR $sub: Could not open $pdb_obs_top_dir/$two/$pdb4.xml for reading:$!\n";
 			}
 		}
 	}elsif(-f "$pdb_obs_top_dir/$two/$pdb4.xml.gz") { 
@@ -1515,7 +1662,8 @@ sub pdbml_fasta_fetch {
 				THR	=> 'T',
 				VAL	=> 'V',
 				TRP	=> 'W',
-				TYR	=> 'Y');
+				TYR	=> 'Y',
+				UNK => 'X');
 
 
 	my @seq;
@@ -1555,7 +1703,7 @@ sub pdbml_fasta_fetch {
 			}else{
 				$one_letter_aa	= 'X';
 				#die "ERROR! $sub: No one letter abbreviation for mon_id $mon_id\n";
-				warn "ERROR! $sub: No abbrev for mon_id $mon_id\n";
+				#warn "ERROR! $sub: No abbrev for mon_id $mon_id\n";
 			}
 
 			if ($DEBUG) { 
@@ -1564,6 +1712,7 @@ sub pdbml_fasta_fetch {
 
 			push (@seq, $one_letter_aa);
 		}else{
+			#print "WARNING! what ($seq_id)\n";
 			$c3++;
 		}
 	}
@@ -2271,6 +2420,10 @@ sub pdbml_asym_annotate_parse {
 		$disulf[$i]{ptnr1_asym_id}	= $ptnr1_label_asym_id;
 		$disulf[$i]{ptnr2_asym_id}	= $ptnr2_label_asym_id;
 
+		$disulf[$i]{ptnr1_comp_id} 	= $ptnr1_label_comp_id;
+		$disulf[$i]{ptnr2_comp_id} 	= $ptnr2_label_comp_id;
+
+
 		$i++;
 	}
 	return(\@helices, \@sheets, \@disulf, \@struct_site_gen);
@@ -2297,17 +2450,12 @@ sub pdbml_date_method {
 	#deposition date (mod = 0)  
 	my $date;
 	my %database_PDB_rev;
-	my $database_PDB_revCategory_XPath = '//PDBx:database_PDB_revCategory/PDBx:database_PDB_rev[@num="1"]';
-	if ($pdbml->exists($database_PDB_revCategory_XPath)) { 
+	#my $database_PDB_revCategory_XPath = '//PDBx:database_PDB_revCategory/PDBx:database_PDB_rev[@num="1"]';
+	my $pdbx_audit_revision_history = '//PDBx:pdbx_audit_revision_historyCategory/PDBx:pdbx_audit_revision_history';
+	if ($pdbml->exists($pdbx_audit_revision_history)) { 
 
-		my $rev_node = $pdbml->findnodes($database_PDB_revCategory_XPath)->get_node(1);
-	#	if ($rev_node->exists('PDBx:date_original')) { 
-	#		$date = $rev_node->findvalue('PDBx:date_original');
-	#	}elsif($rev_node->exists('PDBx:date')) { 
-			$date = $rev_node->findvalue('PDBx:date');
-	#	}else{
-	#		die "$pdb_id?";
-	#	}
+		my $rev_node = $pdbml->findnodes($pdbx_audit_revision_history)->get_node(1);
+		$date = $rev_node->findvalue('PDBx:revision_date');
 	}
 	my $uc_pdb_id = uc($pdb_id);
 	#print "$pdb_id $exptl{$uc_pdb_id}{method} $date\n";

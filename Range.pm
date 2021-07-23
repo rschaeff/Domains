@@ -200,7 +200,7 @@ sub pdb_range_expand {
 		if (!$pdbnum_to_seqid{$start}) { 
 			#print "WARNING! $sub: PDB number $start not found, skipping segment\n";
 			#next;
-			print "WARNING! $sub: PDB number $start not found, attempting fast forward\n";
+			print "WARNING! $sub: PDB number $start ($pdb, $chain) not found, attempting fast forward\n";
 			for (my $i = $start; $i < $end; $i++) { 
 				#print "$sub FFORWARD $i\n";
 				if ($pdbnum_to_seqid{$i}) { 
@@ -215,7 +215,7 @@ sub pdb_range_expand {
 			#return 0;
 		}
 		if (!$pdbnum_to_seqid{$end}) { 
-			print "WARNING! $sub PDB num $end not found, attempting rewind\n";
+			print "WARNING! $sub PDB num $end ($pdb, $chain) not found, attempting rewind\n";
 			for (my $i = $end; $i > $start; $i--) { 
 				#print "$sub REWIND $i\n";
 				if ($pdbnum_to_seqid{$i}) { 
@@ -412,7 +412,8 @@ sub multi_chain_pdb_rangify {
 					$i++;
 					next;
 				}else{ 
-					die "?!\n";
+					warn "?!\n";
+					return -1
 				}
 			}
 		}else{ 
@@ -459,11 +460,11 @@ sub rangify {
 				if ($pos[$i-1] +1 == $pos[$i]) { 
 					$i++;
 					next;
-				}elsif ($pos[$i-1] + 1 < $pos[$i]) { 
+				}elsif ($pos[$i-1] + 1 != $pos[$i]) { 
 					$range .= $pos[$i-1]  . ",";
 					if ($pos[$i+1] eq $pos[$i]+1) { 
 						$range .= $pos[$i] . "-"; #Drops sometimes
-					}elsif ($pos[$i+1] > $pos[$i] + 1) { 
+					}elsif ($pos[$i+1] > $pos[$i] + 1 || $pos[$i+1] < $pos[$i]+ 1) { 
 						$range .= $pos[$i] . ",";
 						$on = 0;
 					}elsif ($pos[$i+1] == $pos[$i]) { 
@@ -489,7 +490,8 @@ sub rangify {
 					$i++;
 					next;
 				}else{ 
-					die "?!\n";
+					warn "?!\n";
+					return -1;
 				}
 			}
 		}else{ 
@@ -543,7 +545,7 @@ sub multi_chain_rangify {
 					$range .= $$pos_aref[$i-1]  . ",";
 					if ($$pos_aref[$i+1] eq $$pos_aref[$i]+1) { 
 						$range .= "$$chain_aref[$i]:$$pos_aref[$i]-";
-					}elsif ($$pos_aref[$i+1] > $$pos_aref[$i] + 1 || $$chain_aref[$i+1] ne $$chain_aref[$i]) { 
+					}elsif ($$pos_aref[$i+1] > $$pos_aref[$i] + 1 || $$pos_aref[$i+1] < $$pos_aref[$i] + 1 || $$chain_aref[$i+1] ne $$chain_aref[$i]) { 
 						$range .= "$$chain_aref[$i]:$$pos_aref[$i],";
 						$on = 0;
 					}elsif ($$pos_aref[$i+1] == $$pos_aref[$i]) { 
@@ -571,6 +573,7 @@ sub multi_chain_rangify {
 					$i++;
 					next;
 				}else{ 
+					print "pos_fail: $$pos_aref[$i], $$pos_aref[$i+1], $$chain_aref[$i], $$chain_aref[$i+1]\n";
 					die "?!\n";
 				}
 			}
@@ -585,7 +588,7 @@ sub multi_chain_pdb_range_expand {
 	my $sub = 'multi_chain_pdb_range_expand';
 
 	my ($range_str, $seqid_aref, $chain_aref, $pdbnum_href) = @_;
-	$range_str =~ /\w:\-?\d+\-\d+/ or return;
+	$range_str =~ /\w+:\-?\d+\-\d+/ or return;
 
 	my %pdbnum_to_seqid;
 	for (my $i = 0; $i < scalar(@$seqid_aref); $i++) { 
@@ -594,6 +597,8 @@ sub multi_chain_pdb_range_expand {
 		if (exists($$pdbnum_href{$chain}{$seqid})) { 
 			my $pdbnum = $$pdbnum_href{$chain}{$seqid};
 			$pdbnum_to_seqid{$chain}{$pdbnum} = $seqid;
+		}else{
+			warn "WARNING! $sub: $chain/$seqid doesn't have pdbnum\n";
 		}
 	}
 
@@ -603,14 +608,14 @@ sub multi_chain_pdb_range_expand {
 	my @chain;
 	my @segs = split(/,/, $range_str);
 	foreach my $seg (@segs) { 
-		if ($seg =~ /(\w):(\-?\d+\w?)\-(\-?\d+\w?)/) { 
+		if ($seg =~ /(\w+):(\-?\d+\w?)\-(\-?\d+\w?)/) { 
 			my $chain = $1;
 			my $start = $2;
 			my $end	= $3;
 
 			if ($start eq $end) { next } 
 			if (!$pdbnum_to_seqid{$chain}{$start}) { 
-				print "WARNING! $sub: PDB number $start not found,  attempting fast forward\n";
+				print "WARNING! $sub: PDB number $chain,$start not found, attempting fast forward\n";
 				for (my $i = $start; $i < $end; $i++) { 
 					#print "$sub FFORWARD $i\n";
 					if ($pdbnum_to_seqid{$chain}{$i}) { 
@@ -619,7 +624,7 @@ sub multi_chain_pdb_range_expand {
 					}
 				}
 				if (!$pdbnum_to_seqid{$chain}{$start}) { 
-					print "ERROR! $sub: Forward failed, skipping segment\n";
+					print "WARNING! $sub: Forward failed, skipping segment $seg\n";
 					next;
 				}
 			}
@@ -709,6 +714,7 @@ sub range_expand {
 	my ($range_str) = @_;
 	
 	$range_str =~ /\-?\d+/ or return;
+	chomp $range_str;
 	my @range;
 	my @segs = split(/,/, $range_str); 
 	my %seen;
@@ -723,8 +729,8 @@ sub range_expand {
 				}
 				$seen{$i}++;
 			}
-		}elsif($seg =~ /\d+/) { 
-			push (@range, $seg);
+		}elsif($seg =~ /(\d+)/) { 
+			push (@range, $1);
 		}else{
 			#die "ERROR! $sub: Bad segment regexp: $seg\n";
 			print "WARNING! $sub: Bad segment regexp: $seg $range_str\n";
@@ -882,7 +888,7 @@ sub range_exclude {
 		$seen{$$range1_aref[$i]}++;
 	}
 	for (my $i = 0; $i < scalar(@$range2_aref); $i++) { 
-		if ($seen{$$range2_aref[$i]}) { 
+		if (defined $$range2_aref[$i] && $seen{$$range2_aref[$i]}) { 
 			if ($DEBUG > 1) { 
 				print "DEBUG $sub: DELETE $i $$range2_aref[$i]\n";
 			}
@@ -971,22 +977,25 @@ sub multi_chain_residue_coverage {
 		my $chain1 = $$chain1_aref[$i];
 		my $comp_key = $pos1 . $chain1;
 
-		$union{$comp_key} = 1;
+		#$union{$comp_key} = 1;
+		$union{$chain1}{$pos1} = 1;
 	}
 	for (my $i = 0; $i < scalar(@$range2_aref); $i++) { 
 		my $pos2 = $$range2_aref[$i];
 		my $chain2 = $$chain2_aref[$i];
 		my $comp_key = $pos2 . $chain2;
-		if ($union{$comp_key}) { $isect{$comp_key} = 1 } 
-		$union{$comp_key} = 1;
+		if ($union{$chain2}{$pos2}) { $isect{$chain2}{$pos2} = 1 } 
+		#$union{$comp_key} = 1;
+		$union{$chain2}{$pos2} = 1;
 	}
-	my @isect = sort {$a cmp $b} keys %isect;
-	if ($length1 > 0) { 
-		my $res_count = scalar(@isect);
-		return $res_count;
-	}else{
-		return 0;
+	#my @isect = sort {$a cmp $b} keys %isect;
+	my $rescount = 0;
+	foreach my $k1 (keys %isect)  {
+		foreach my $k2 (keys %{$isect{$k1}}) { 
+			$rescount++;
+		}
 	}
+	return $rescount;
 }
 
 sub multi_chain_region_coverage { 
@@ -1166,7 +1175,7 @@ sub multi_chain_ungap_range {
 				my $start2	= $2;
 				my $end2	= $3;
 
-				if ($chain1 eq $chain2 && abs($start2 - $end1) < $GAP_TOL) { 
+				if ($chain1 eq $chain2 && $start2 - $end1 < $GAP_TOL && $start2 - $end1 > 0) { 
 					splice(@segs, $i, 2, "$chain1:$start1-$end2");
 				}else{
 					$i++;
@@ -1175,7 +1184,7 @@ sub multi_chain_ungap_range {
 			elsif($segs[$i+1] =~ /(\w+):(\d+)/) { 
 				my $solo_chain2 = $1;
 				my $solo2 = $2;
-				if ($chain1 eq $solo_chain2 && abs($solo2 - $end1) < $GAP_TOL) { 
+				if ($chain1 eq $solo_chain2 && $solo2 - $end1 < $GAP_TOL && $solo2 - $end1 > 0) { 
 					splice(@segs, $i, 2, "$solo_chain2:$start1-$solo2")
 				}else{	
 					$i++;
@@ -1195,7 +1204,7 @@ sub multi_chain_ungap_range {
 				my $chain2 = $1;
 				my $start2 = $2;
 				my $end2 = $3;
-				if ($solo_chain1 eq $chain2 && abs($solo1 - $start2) < $GAP_TOL) { 
+				if ($solo_chain1 eq $chain2 && $solo1 - $start2 < $GAP_TOL && $solo1 - $start2 > 0) { 
 					splice(@segs, $i, 2, "$chain2:$solo1-$end2");
 				}else{
 					$i++;
@@ -1204,7 +1213,7 @@ sub multi_chain_ungap_range {
 			elsif($segs[$i+1] =~ /(\w+):(\d+)/) { 
 				my $solo_chain2 = $1;
 				my $solo2 = $2;
-				if ($solo_chain2 eq $solo2 && abs($solo2 - $solo1) < $GAP_TOL) { 
+				if ($solo_chain2 eq $solo2 && $solo2 - $solo1 < $GAP_TOL && $solo2 - $solo1 > 0) { 
 					splice(@segs, $i, 2, "$solo_chain2:$solo1-$solo2");
 				}else{
 					$i++;
@@ -1252,7 +1261,7 @@ sub ungap_range {
 			if ($segs[$i+1] =~ /(\-?\d+)\-(\-?\d+)/) { 
 				my $start2 = $1;
 				my $end2 = $2;
-				if (abs($start2 - $end1) < $GAP_TOL) { 
+				if (($start2 - $end1) < $GAP_TOL && $start2 - $end1 > 0) { 
 					splice(@segs, $i, 2, "$start1-$end2");
 				}else{
 					$i++;
@@ -1260,7 +1269,7 @@ sub ungap_range {
 			}
 			elsif($segs[$i+1] =~ /(\d+)/) { 
 				my $solo2 = $1;
-				if (abs($solo2 - $end1) < $GAP_TOL) { 
+				if (($solo2 - $end1) < $GAP_TOL) { 
 					splice(@segs, $i, 2, "$start1-$solo2");
 				}else{
 					$i++;
@@ -1274,7 +1283,7 @@ sub ungap_range {
 			if ($segs[$i+1] =~ /(\-?\d+)\-(\-?\d+)/) { 
 				my $start2 = $1;
 				my $end2 = $2;
-				if (abs($solo1 - $start2) < $GAP_TOL) { 
+				if (abs($solo1 - $start2) < $GAP_TOL && ($solo1 - $start2) > 0) { 
 					splice(@segs, $i, 2, "$solo1-$end2");
 				}else{
 					$i++;
@@ -1282,7 +1291,7 @@ sub ungap_range {
 			}
 			elsif($segs[$i+1] =~ /(\d+)/) { 
 				my $solo2 = $1;
-				if (abs($solo2 - $solo1) < $GAP_TOL) { 
+				if (($solo2 - $solo1) < $GAP_TOL && ($solo2 - $solo1) > 0) { 
 					splice(@segs, $i, 2, "$solo1-$solo2");
 				}else{
 					$i++;

@@ -10,8 +10,10 @@ use Domains::Range;
 use LWP::UserAgent;
 use JSON::XS;
 use XML::LibXML;
+use Term::ProgressBar;
 
 my $FORCE_OVERWRITE = 0;
+my $GEN = 1;
 
 our @ISA = 'Exporter';
 
@@ -22,58 +24,90 @@ our @EXPORT = (
 				"&chainwise_domain_to_ecod_domain",
 				"&assemble_chainwise_domain_fragments",
 				"&sifts_pdb_update",
+				"&sifts_pdb_update_single",
+				"&has_any_chain",
+				"&has_unp_mapping"
 				);
 
+my $pdb_top_dir = '/data/ecod/pdb_data';
+
 sub sifts_pdb_update { 
-	my $SIFTS_API_URL = "http://www.ebi.ac.uk/pdbe/api/mappings/uniprot/"; 
+	my $SIFTS_API_URL = "https://www.ebi.ac.uk/pdbe/api/mappings/uniprot/"; 
 
 	my ($pdb_xml_doc) = @_;
 
 	my $ua = new LWP::UserAgent;
-	$ua->agent("auto_uniprot_to_ecod/1.0". $ua->_agent);
+	$ua->agent("auto_uniprot_to_ecod/1.0 ". $ua->_agent);
 	$ua->from('ecod.database@gmail.com');
-	$ua->proxy(['http', 'ftp'], "http://proxy.swmed.edu:3128");
+	$ua->proxy(['https', 'ftp'], "http://proxy.swmed.edu:3128");
+	$ua->protocols_allowed(['https', ]);
+	$ua->ssl_opts( 
+		verify_hostname => 0,
+		SSL_ca_path => '/etc/ssl/certs'
+		);
+	my @keys = $ua->ssl_opts;
+	foreach my $k (@keys) { 
+		printf "%s\t%s\n", $k, $ua->ssl_opts($k);
+	}
+	#$ua->proxy(https => 'https://proxy.swmed.edu:3128');
 
-	$ENV{http_proxy} = "proxy.swmed.edu:3128";
+	#$ENV{https_proxy} = "proxy.swmed.edu:3128";
+	$ENV{https_debug} = 1;
 	my $i = 0;
 	foreach my $pdb_node (find_pdb_nodes($pdb_xml_doc)) { 
+		my $pdb_id = get_pdb_id($pdb_node);
 		next unless has_any_chain($pdb_node);
 		next if is_obsolete($pdb_node);
-		if (has_unp_mapping($pdb_node) && !$FORCE_OVERWRITE) { next } 
-		my $pdb_id = get_pdb_id($pdb_node);
-		my $pdb_url = $SIFTS_API_URL . $pdb_id;
-		if ($pdb_node->exists('unp_mapping')) { 
+		my $recalculate = $pdb_node->findvalue('@recalculate_unp') eq 'true' ? 1 : 0;
+		if (has_unp_mapping($pdb_node) && !$FORCE_OVERWRITE && !$recalculate) { 
+			#print "skipping $pdb_id\n";
 			next;
+		} 
+		my $pdb_url = $SIFTS_API_URL . $pdb_id;
+		print "$pdb_url\n";
+		if ($pdb_node->exists('unp_mapping')) { 
+			foreach my $unp_mapping_node ($pdb_node->findnodes('unp_mapping')) { 
+				$unp_mapping_node->unbindNode;
+			}
 		}
+		if ($pdb_node->findvalue('@no_sifts_unp_mapping') eq 'true') { next } 
+		print "p:$pdb_id\n";
 
 		#print "url:$pdb_url\n";
-		my $req = HTTP::Request->new(GET => $pdb_url);
-		$req->content_type('application/x-www-form-urlencoded');
+		if ($GEN) { 
+			my $req = HTTP::Request->new(GET => $pdb_url);
+			$req->content_type('application/x-www-form-urlencoded');
 
-		my $response 	= $ua->request($req);
-		my $json	= decode_json($response->content); 
-		
-		my $href = $$json{$pdb_id}{UniProt};
-		if (keys %$href > 0) { 
-			my @unp_ids = keys %$href;
-			foreach my $unp_id (keys %$href) { 
-				my $unp_node = $pdb_xml_doc->createElement('unp_mapping');
-				$unp_node->setAttribute('unp_acc', $unp_id);
-				$unp_node->setAttribute('id', $$href{$unp_id}{identifier});
-				$unp_node->setAttribute('name', $$href{$unp_id}{name});
+			my $response 	= $ua->request($req);
+			print $response->content ."\n";
+			my $json	= decode_json($response->content); 
+			
+			my $href = $$json{$pdb_id}{UniProt};
+			if (keys %$href > 0) { 
+				my @unp_ids = keys %$href;
+				foreach my $unp_id (keys %$href) { 
+					my $unp_node = $pdb_xml_doc->createElement('unp_mapping');
+					$unp_node->setAttribute('unp_acc', $unp_id);
+					$unp_node->setAttribute('id', $$href{$unp_id}{identifier});
+					$unp_node->setAttribute('name', $$href{$unp_id}{name});
 
-				my $aref = $$href{$unp_id}{mappings};
-				my $unp_range 			= get_unp_range_from_sifts_json($aref);
-				my $residue_range 		= get_res_range_from_sifts_json($aref); 
-				my $pdb_residue_range  	= get_pdb_res_range_from_sifts_json($aref);
-				$unp_node->appendTextChild('unp_range', $unp_range);
-				$unp_node->appendTextChild('residue_range', $residue_range);
-				$unp_node->appendTextChild('pdb_residue_range', $pdb_residue_range);
-				$pdb_node->appendChild($unp_node);
+					my $aref = $$href{$unp_id}{mappings};
+					my $unp_range 			= get_unp_range_from_sifts_json($aref);
+					my $residue_range 		= get_res_range_from_sifts_json($aref); 
+					my $pdb_residue_range  	= get_pdb_res_range_from_sifts_json($aref);
+					$unp_node->appendTextChild('unp_range', $unp_range);
+					$unp_node->appendTextChild('residue_range', $residue_range);
+					$unp_node->appendTextChild('pdb_residue_range', $pdb_residue_range);
+					$pdb_node->appendChild($unp_node);
+				}
+			}else{
+				#print "No mappings!\n";
+				$pdb_node->setAttribute('no_sifts_unp_mapping', 'true');
 			}
 		}else{
-			#print "No mappings!\n";
+			print "PDB: $pdb_id\n";
 		}
+		$i++;
 	}
 }
 
@@ -167,9 +201,18 @@ sub get_pdb_res_range_from_sifts_json {
 
 sub chainwise_chain_to_domain {
     my ($chainwise_xml_doc) = @_;
+	my $progress = Term::ProgressBar->new($chainwise_xml_doc->findnodes('//chain')->size());
+	my $i = 0;
     foreach my $chain_node ( find_chain_nodes($chainwise_xml_doc) ) {
 
         my $chain_id = get_chain_id($chain_node);
+
+		if ($chain_node->exists('.//domain/uniprot') && $chain_node->findnodes('.//domain/uniprot')->size() == $chain_node->findnodes('.//domain')->size() ) { 
+
+			#print "has uniprot for all domains, skipping...\n";
+			$progress->update($i++);
+			next;
+		}
 
         if ( has_uniprot_mapping($chain_node) ) {
             foreach my $unp_node ( find_unp_mapping_nodes($chain_node) ) {
@@ -187,6 +230,12 @@ sub chainwise_chain_to_domain {
                 my ($unp_range_aref) = range_expand($unp_range);
 
                 my $display_debug = 0;
+				if ( scalar @$unp_range_aref == 1 || scalar @$unp_range_aref == 0) { 
+					warn "WARNING! 0 or 1 sized ranged on $unp_acc, skipping...\n";
+					
+					$progress->update($i++);
+					next;
+				}
                 if ( scalar @$unp_range_aref != scalar @$unp_seqid_aref ) {
                     my $size1 = scalar(@$unp_range_aref);
                     my $size2 = scalar(@$unp_seqid_aref);
@@ -194,10 +243,13 @@ sub chainwise_chain_to_domain {
                     #warn "WARNING! $unp_acc aref size diff $size1 $size2 \n";
                     #$display_debug++;
                     $unp_node->setAttribute( 'mapping_discrepancy', 'true' );
-                    next;
+
+					#$progress->update($i++);
+                   #next;
                 }
 
                 foreach my $domain_node ( find_domain_nodes($chain_node) ) {
+					next if $domain_node->exists('uniprot');
                     my $domain_seqid_range = get_seqid_range($domain_node);
 
                     my ( $domain_seqid_aref, $domain_chain_aref ) = multi_chain_range_expand($domain_seqid_range);
@@ -236,12 +288,19 @@ sub chainwise_chain_to_domain {
                                 }
                             }
                         }
-                        my $domain_unp_range = rangify(@domain_unp_range);
-                        $domain_unp_node->appendTextChild( 'unp_range', $domain_unp_range );
+						if (scalar @domain_unp_range > 2) { 
+							my $domain_unp_range = rangify(@domain_unp_range);
+							$domain_unp_node->appendTextChild( 'unp_range', $domain_unp_range );
 
-                        my $seqid_unp_range = multi_chain_rangify( \@seqid_unp_range, \@seqid_unp_chain );
-                        $domain_unp_node->appendTextChild( 'seqid_range', $seqid_unp_range );
-						$found = 1;
+							my $seqid_unp_range = multi_chain_rangify( \@seqid_unp_range, \@seqid_unp_chain );
+							$domain_unp_node->appendTextChild( 'seqid_range', $seqid_unp_range );
+							$found = 1;
+						}else{
+							warn "WARNING! <3 range for $unp_acc, skipping...\n";
+							
+							$progress->update($i++);
+							next;
+						}
                     }
                     else {
 					     #Do nothing
@@ -250,12 +309,15 @@ sub chainwise_chain_to_domain {
                 }
             }
         }
+		$progress->update($i++);
     }
 }
 
 #PDB pdb to PDB chain
 sub pdb_unp_to_pdb_chain_unp {
     my ($pdb_xml_doc) = @_;
+	my $progress = Term::ProgressBar->new($pdb_xml_doc->findnodes('//pdb')->size());
+	my $i = 0;
     foreach my $pdb_node ( find_pdb_nodes($pdb_xml_doc) ) {
         my $pdb_id = get_pdb_id($pdb_node);
         my %chains;
@@ -317,13 +379,16 @@ sub pdb_unp_to_pdb_chain_unp {
                 }
             }
         }
+		$progress->update($i++);
     }
 }
 
 #PDB to chainwise
 sub pdb_chain_to_chainwise_chain_unp {
     my ( $pdb_xml_doc, $chainwise_xml_doc ) = @_;
+	my $progress1 = Term::ProgressBar->new($pdb_xml_doc->findnodes('//chain')->size()) ;
     my %chains;
+	my $i =0;
     foreach my $chain_node ( find_chain_nodes($pdb_xml_doc) ) {
 
         my $chain_id = get_chain_id($chain_node);
@@ -332,8 +397,11 @@ sub pdb_chain_to_chainwise_chain_unp {
         if ( $chain_node->exists('unp_mapping') ) {
             $chains{$pdb_id}{$chain_id} = $chain_node;
         }
+		$progress1->update($i++);
     }
 
+	$i = 0;
+	my $progress2 = Term::ProgressBar->new($chainwise_xml_doc->findnodes('//chain')->size());
     foreach my $chain_node ( find_chain_nodes($chainwise_xml_doc) ) {
         my $chain_id = get_chain_id($chain_node);
         my $pdb_id   = get_pdb_id( $chain_node->parentNode );
@@ -342,6 +410,7 @@ sub pdb_chain_to_chainwise_chain_unp {
                 $chain_node->appendChild($unp_node);
             }
         }
+		$progress2->update($i++);
     }
 }
 
@@ -455,7 +524,78 @@ sub assemble_chainwise_domain_fragments {
     }
 }
 
+sub sifts_pdb_update_single { 
+	my $SIFTS_API_URL = "http://www.ebi.ac.uk/pdbe/api/mappings/uniprot/"; 
 
+	my ($pdb_xml_doc, $target_pdb_id) = @_;
+
+	my $ua = new LWP::UserAgent;
+	$ua->agent("auto_uniprot_to_ecod/1.0". $ua->_agent);
+	$ua->from('ecod.database@gmail.com');
+	$ua->proxy(['http', 'ftp'], "http://proxy.swmed.edu:3128");
+
+	$ENV{http_proxy} = "proxy.swmed.edu:3128";
+	my $i = 0;
+	foreach my $pdb_node (find_pdb_nodes($pdb_xml_doc)) { 
+		my $pdb_id = get_pdb_id($pdb_node);
+		my $two = substr($pdb_id, 1, 2);
+		next unless $target_pdb_id eq $pdb_id;
+		next unless has_any_chain($pdb_node);
+		next if is_obsolete($pdb_node);
+		if (has_unp_mapping($pdb_node) && !$FORCE_OVERWRITE) { 
+			#print "skipping $pdb_id\n";
+			next;
+		} 
+		my $pdb_url = $SIFTS_API_URL . $pdb_id;
+		if ($pdb_node->exists('unp_mapping')) { 
+			next;
+		}
+		if ($pdb_node->findvalue('@no_unp_mapping') eq 'true') { next } 
+		print "p:$pdb_id\n";
+
+		#print "url:$pdb_url\n";
+		my $req = HTTP::Request->new(GET => $pdb_url);
+		$req->content_type('application/x-www-form-urlencoded');
+
+		my $response 	= $ua->request($req);
+		my $json	= decode_json($response->content); 
+		
+		my $href = $$json{$pdb_id}{UniProt};
+		if (keys %$href > 0) { 
+			my @unp_ids = keys %$href;
+			foreach my $unp_id (keys %$href) { 
+				my $unp_node = $pdb_xml_doc->createElement('unp_mapping');
+				$unp_node->setAttribute('unp_acc', $unp_id);
+				$unp_node->setAttribute('id', $$href{$unp_id}{identifier});
+				$unp_node->setAttribute('name', $$href{$unp_id}{name});
+
+				my $aref = $$href{$unp_id}{mappings};
+				my $unp_range 			= get_unp_range_from_sifts_json($aref);
+				my $residue_range 		= get_res_range_from_sifts_json($aref); 
+				my $pdb_residue_range  	= get_pdb_res_range_from_sifts_json($aref);
+				$unp_node->appendTextChild('unp_range', $unp_range);
+				$unp_node->appendTextChild('residue_range', $residue_range);
+				$unp_node->appendTextChild('pdb_residue_range', $pdb_residue_range);
+				$pdb_node->appendChild($unp_node);
+			}
+		}else{
+			#print "No mappings!\n";
+			$pdb_node->setAttribute('no_sifts_unp_mapping', 'true');
+		}
+		my ($mini_xml_doc, $mini_root_node) = xml_create('mini_sifts_pdb_doc');
+		$mini_root_node->appendChild($pdb_node);
+		my $mini_fn = "$pdb_top_dir/$two/$pdb_id/$pdb_id.sifts.xml";
+		if (! -d "$pdb_top_dir/$two"){ 
+			mkdir "$pdb_top_dir/$two";
+		}
+		if (! -d "$pdb_top_dir/$two/$pdb_id") { 
+			mkdir "$pdb_top_dir/$two/$pdb_id";
+		}
+		xml_write($mini_xml_doc, $mini_fn);
+		$i++;
+		return 1;
+	}
+}
 
 sub has_any_chain { 
 	$_[0]->exists('chain');

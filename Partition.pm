@@ -9,6 +9,7 @@ use Data::Dumper;
 use Date::Format;
 use Date::Parse;
 
+
 use Storable;
 use Cwd;
 
@@ -21,6 +22,7 @@ use Domains::PDBml;
 use Domains::Dali;
 use Domains::SGE;
 use XML::Grishin;
+use SQL::Util;
 
 use ECOD::Reference;
 
@@ -36,7 +38,9 @@ our @EXPORT = (
     "&domain_partition_by_hhsearch",  "&dali_summary",
     "&reference_cache_load",          "&generate_singleton_run_list",
     "&generate_domain_summary_files", "&generate_struct_search_jobs",
+	"&generate_dssp_jobs", "&generate_fasta",
     "&job_list_generate_fasta",       "&run_list_maintain",
+	"&job_list_generate_fasta_para",  "&generate_fasdta",
     "&job_list_maintain",             "&jobify_dali",
     "&immediate_dali",                '$pdb_dir',
     '$pdbml_dir',                     '$status_dir',
@@ -74,6 +78,9 @@ my $HHSEARCH_EXE             = '/home/rschaeff/hhsuite-2.0.15-linux-x86_64/bin/h
 my $HH_LIB                   = '/home/rschaeff/hhsuite-2.0.15-linux-x86_64/lib/hh';
 my $SINGLE_BOUNDARY_OPTIMIZE = '/data/ecod/weekly_updates/weeks/bin/single_boundary_optimize.pl';
 my $SINGLE_PEPTIDE_FILTER    = '/data/ecod/weekly_updates/weeks/bin/single_xml_peptide_prefilter.pl';
+my $GENERATE_FASTA			 = '/data/ecod/weekly_updates/weeks/bin/generate_fasta.pl';
+my $GENERATE_PDB			 = '/data/ecod/weekly_updates/weeks/bin/generate_pdb.pl';
+my $DSSP_EXE				 = '/data/ecod/database_versions/bin/dssp_single_pdb.pl';
 
 my $NR20_TMP_DB		= '/home/rschaeff_1/side/wtf_hh/nr20_12Aug11';
 #my $NR20_TMP_DB = '/local_scratch/rschaeff/nr20_12Aug11';
@@ -89,7 +96,7 @@ my $NO_PSIBLAST                = 1;      #Is PSIBLAST providing ANY value over H
 
 #job_list_asess
 my $INCLUSION_THRESHOLD = 0.7;
-my $FILTER_VERSION      = 6;             #peptide filter
+my $FILTER_VERSION      = 7;             #peptide filter
 my $CC_FILTER_VERSION   = 1;
 my $SCREEN_REPS         = 1;             #Screen for rep95 nodes
 my $SCREEN_MC_DOM       = 1;             #Screen for MC domain components
@@ -104,6 +111,12 @@ my $DOMAIN_DATA_DIR = '/data/ecod/domain_data';
 if ( !-d $DOMAIN_DATA_DIR ) {
     die "ERROR! domain data dir $DOMAIN_DATA_DIR not found\n";
 }
+
+my $CHAIN_DATA_DIR = '/data/ecod/chain_data';
+if (!-d $CHAIN_DATA_DIR) { 
+	die "EROR! chain data dir $CHAIN_DATA_DIR not found\n";
+}
+
 my $pdb_dir = "/usr2/pdb/data/structures/divided/pdb/";
 if ( !-d $pdb_dir ) {
     die "ERROR! pdb dir $pdb_dir not found\n";
@@ -117,6 +130,524 @@ my $status_dir = '/usr2/pdb/data/status';
 if ( !-d $status_dir ) {
     die "ERROR! status directory $status_dir not found\n";
 }
+
+sub generate_dssp_jobs { 
+	my $sub = 'generate_dssp_jobs';
+
+	my $job_xml_doc = xml_open($_[0]);
+
+	my ($job_dump_dir, $job_list_dir) = get_job_dirs_from_job_xml($job_xml_doc);
+	my @cmds;
+	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
+		my ($pdb_id, $chain_id) = get_pdb_chain($job_node);
+		my $pdb_chain = $pdb_id . "_" . $chain_id;
+		my $pdb_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.pdb";
+		my $dssp_ss_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.dssp_ss";
+		if (-f $pdb_fn) { 
+			my $cmd = "$DSSP_EXE $pdb_fn";
+			push (@cmds, $cmd);
+		}
+	}
+	jobify_and_qsub(\@cmds, 'dssp', 10);
+}
+
+sub dssp_parse_to_string { 
+	my ($dssp_fn, $out_fn) = @_;
+
+	open (my $fh, "<", $dssp_fn) or die "ERROR! Could not open $dssp_fn for reading:$!\n";
+
+	my $start =0 ;
+	my @ss;
+	while (my $ln = <$fh>) { 
+		if ($ln =~ /^\s+#/) { $start = 1; next }
+		next unless $start;
+		my $ss = substr($ln, 16, 1) =~ /\w+/ ? substr($ln, 16, 1) : '-';	
+		push (@ss, $ss);
+
+	}
+	my $str = join('', @ss);
+	open (my $out_fh, ">", $out_fn) or die "ERROR! Could not open $out_fn for reading:$!\n";
+	print $out_fh $str;
+}
+
+sub generate_domain_summary_xml_files { 
+	my $sub = 'generate_domain_summary_xml_file';
+	my ($run_list_summary_xml_fn, $force_overwrite, $use_reps) = @_;
+	
+	my $run_list_summary_doc = xml_open($ARGV[0]);
+
+	my $weekly_update_dir = get_weekly_update_dir($run_list_summary_doc);
+	if (! -d $weekly_update_dir) { 
+		warn "WARNING! $sub: directory not found ($weekly_update_dir)\n";
+		return 0;
+	}
+
+	my @run_data;
+	my $i = 0;
+	foreach my $run_node (find_run_list_nodes($run_list_summary_doc)) { 
+
+		my $id 				= get_id($run_node);
+		my $process 		= get_process($run_node);
+		my $mode			= get_mode($run_node);
+		my $run_list_file 	= get_run_list_file($run_node);
+		my $run_list_label 	= get_run_list_label($run_node);
+		my $run_list_desc   = get_run_list_desc($run_node);
+		my $run_list_reference = get_reference($run_node);
+
+		my $domain_prefix = get_domain_prefix($run_node);
+
+		$run_data[$i]{id}		= $id;
+		$run_data[$i]{process}		= $process;
+		$run_data[$i]{mode}		= $mode;
+		$run_data[$i]{run_list_file}	= $run_list_file;
+		$run_data[$i]{run_list_label}	= $run_list_label;
+		$run_data[$i]{run_list_desc}	= $run_list_desc;
+		$run_data[$i]{domain_prefix}	= $domain_prefix;
+		$run_data[$i]{reference}	= $run_list_reference;
+		$i++;
+
+	}
+
+	for (my $i = 0; $i < scalar @run_data; $i++) { 
+		my $id 				= $run_data[$i]{id};
+		my $run_list_file 	= $run_data[$i]{run_list_file};
+		my $run_list_label 	= $run_data[$i]{run_list_label};
+
+		my $process 		= $run_data[$i]{process};
+
+		if ($process eq 'true') { 
+			my $run_list_domain_summary_file = run_process_v2(\%{$run_data[$i]}, $weekly_update_dir);
+			my $fn = "$weekly_update_dir/run_list.latest.domain_summary.xml";
+			unlink($fn);
+			symlink($run_list_domain_summary_file, $fn);
+			if (!-l $fn) { 
+				warn "WARNING! $sub: latest symlink not generated\n"; }
+		}
+	}
+
+	foreach my $run_node (find_run_list_nodes($run_list_summary_doc)) {
+		my $id		= get_id($run_node);
+		my @runs 	= grep{$_->{id} == $id} @run_data;
+		if (scalar @runs > 1) { 
+			die "ERROR! $sub: multiple runs with non unique id $id\n";
+		}
+		if ($runs[0]{domain_summary_file}) { 
+			foreach my $ds_node (find_domain_summary_file_nodes($run_node)) { 
+				$ds_node->unbindNode;
+			}
+			$run_node->appendTextChild('domain_summary_file', $runs[0]{domain_summary_file});
+		}
+	}
+	xml_write($run_list_summary_doc, "$run_list_summary_xml_fn.test");
+}
+
+sub reference_library_load { 
+	my $sub = 'reference_library_load';
+
+	my ($reference) = @_;
+	
+	my $ref_loc;
+	if ($REF_XML{$reference} && -f $REF_XML{$reference}) { 
+		$ref_loc = $REF_XML{$reference};
+	}else{
+		die "ERROR! $sub: no ref $reference\n";
+	}
+	
+	my $xml_fh;
+	open ($xml_fh, $ref_loc) or die "Could not open $ref_loc for reading:$!\n";
+
+	my $ref_xml_doc = XML::LibXML->load_xml( IO => $xml_fh );
+
+	close $xml_fh;
+
+	return $ref_xml_doc;
+}
+
+		
+		
+sub domain_merge_v2 { 
+	my $sub = 'domain_merge_v2';
+
+	my ($domain_summary_doc, $reference, $week_label) = @_;
+
+	my $pdb_chain_XPath = qq{//pdb_chain[\@week_label='$week_label']};
+
+	if ($DEBUG) { 
+		print "DEBUG $sub: $reference $week_label\n";
+	}
+
+	foreach my $pc_node ($domain_summary_doc->findnodes($pdb_chain_XPath)->get_nodelist() ) { 
+
+		my $pdb		= $pc_node->findvalue('@pdb');
+		my $chain	= $pc_node->findvalue('@chain');
+
+		my @types;
+		my %dp_domains;
+		foreach my $dp_node ($pc_node->findnodes('domain_parse')) { 
+
+			my $type = $dp_node->findvalue('@type');
+
+			if (!$dp_node->exists('job/domain_list/domain')) { next } 
+
+			push (@types, $type);
+			
+			foreach my $dom_node ($dp_node->findnodes('job/domain_list/domain')) { 
+				push (@{$dp_domains{$type}}, $dom_node);
+			}
+
+		}
+
+		my $merge_node	= $domain_summary_doc->createElement('domain_parse');
+		$merge_node->setAttribute('type', 'merge');
+
+		my $job_node	= $domain_summary_doc->createElement('job');
+		$job_node->setAttribute('mode', 'merge');
+		$job_node->setAttribute('reference', $reference);
+
+		$merge_node->appendChild($job_node);
+
+		my $dom_list_node	= $domain_summary_doc->createElement('domain_list');
+		$job_node->appendChild($dom_list_node);
+		
+		my $good_types;
+		if (scalar(@types) == 1) { 
+			foreach my $dom_node (@{$dp_domains{$types[0]}}) { 
+				my $new_dom_node = $dom_node->cloneNode(1);
+				$dom_list_node->appendChild($new_dom_node);
+			}
+			#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$types[0]"]})->get_node(1);
+
+			my $dp_cdc_XPath = qq{domain_parse[\@type="$types[0]"]/chain_domain_coverage};
+			my $dp_cdc_node;
+
+			my $dp_ocdc_XPath = qq{domain_parse[\@type="$types[0]"]/optimized_chain_domain_coverage};
+			my $dp_ocdc_node;
+
+			if ($pc_node->exists($dp_cdc_XPath)) { 
+				$dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
+			}else{
+				$dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
+				$dp_cdc_node->appendTextNode('0');
+			}
+
+			if ($pc_node->exists($dp_ocdc_XPath)) { 
+				$dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
+				my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
+				$merge_node->appendChild($new_ocdc_node);
+			}
+			my $new_cdc_node = $dp_cdc_node->cloneNode(1);
+
+			$merge_node->appendChild($new_cdc_node);
+
+			if ($pc_node->exists("domain_parse[\@type='$types[0]']/job/special_list")) { 
+				my $pc_special_list_node = $pc_node->findnodes("domain_parse[\@type='$types[0]']/job/special_list")->get_node(1);
+				my $new_pc_special_list_node = $pc_special_list_node->cloneNode(1);
+				$job_node->appendChild($new_pc_special_list_node);
+
+			}
+
+
+		}else{
+			#Take either all the seq_iter or all the struct_search nodes	
+			my @good_types;
+			foreach my $type (@types) { 
+				#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
+				#my $cdc 	= $dp_node->findvalue('chain_domain_coverage');	
+
+				my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
+				if ($dp_node->exists('optimized_chain_domain_coverage')) { 
+					my $ocdc = $dp_node->findvalue('optimized_chain_domain_coverage/@unused_res');
+					if ($ocdc && $ocdc <= 25 ) {  # ==0 to <= 25 Thursday, May 09 2013
+						push (@good_types, $type);
+					}
+				}elsif($dp_node->exists('chain_domain_coverage')) {  
+					my $cdc = $dp_node->findvalue('chain_domain_coverage/@unused_res');
+					if ($cdc && $cdc <= 25) { 
+						push (@good_types, $type);
+					}
+				}
+			}
+			
+			my $default1 = 'struct_search';
+			my $default2 = 'seq_iter';
+			my $use_type;
+			if (scalar(@good_types) == 2)  { 
+				$use_type = $default1;
+			}elsif(scalar(@good_types) == 1) { 
+				$use_type = $good_types[0];
+			}else{
+				$use_type = $default2;
+			}
+
+			#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$use_type"]})->get_node(1);
+
+			my $dp_cdc_XPath = qq{domain_parse[\@type="$use_type"]/chain_domain_coverage};
+			my $dp_cdc_node;
+
+			my $dp_ocdc_XPath = qq{domain_parse[\@type="$use_type"]/optimized_chain_domain_coverage};
+			my $dp_ocdc_node;
+
+			if ($pc_node->exists($dp_cdc_XPath)) { 
+				$dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
+			}else{
+				$dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
+				$dp_cdc_node->appendTextNode('0');
+			}
+			my $new_cdc_node = $dp_cdc_node->cloneNode(1);
+			$merge_node->appendChild($new_cdc_node);
+
+			if ($pc_node->exists($dp_ocdc_XPath)) { 
+				my $dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
+				my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
+				$merge_node->appendChild($new_ocdc_node);
+			}
+
+			foreach my $dom_node ( @{$dp_domains{$use_type}}) { 
+
+				my $new_dom_node = $dom_node->cloneNode(1);
+				$dom_list_node->appendChild($new_dom_node);
+			}
+
+			if ($pc_node->exists("domain_parse[\@type='$use_type']/job/special_list")) { 
+				my $pc_special_list_node = $pc_node->findnodes("domain_parse[\@type='$use_type']/job/special_list")->get_node(1);
+				my $new_pc_special_list_node = $pc_special_list_node->cloneNode(1);
+				$job_node->appendChild($new_pc_special_list_node);
+
+			}
+
+
+		}
+		$pc_node->appendChild($merge_node);
+	}
+
+	#Multi_chain case
+	$pdb_chain_XPath = qq{//pdb_chains[\@week_label='$week_label']};
+	foreach my $pc_node ($domain_summary_doc->findnodes($pdb_chain_XPath)->get_nodelist() ) { 
+
+		my $pdb		= $pc_node->findvalue('@pdb');
+		my $chain	= $pc_node->findvalue('@chain');
+
+		my @types;
+		my %dp_domains;
+		foreach my $dp_node ($pc_node->findnodes('domain_parse')) { 
+
+			my $type = $dp_node->findvalue('@type');
+
+			if (!$dp_node->exists('job_asm/domain_list/domain')) { next } 
+
+			push (@types, $type);
+			
+			foreach my $dom_node ($dp_node->findnodes('job_asm/domain_list/domain')) { 
+				push (@{$dp_domains{$type}}, $dom_node);
+			}
+
+		}
+
+		my $merge_node	= $domain_summary_doc->createElement('domain_parse');
+		$merge_node->setAttribute('type', 'merge');
+
+		my $job_node	= $domain_summary_doc->createElement('job');
+		$job_node->setAttribute('mode', 'merge');
+		$job_node->setAttribute('reference', $reference);
+
+		$merge_node->appendChild($job_node);
+
+		my $dom_list_node	= $domain_summary_doc->createElement('domain_list');
+		$job_node->appendChild($dom_list_node);
+		
+		my $good_types;
+		if (scalar(@types) == 1) { 
+			foreach my $dom_node (@{$dp_domains{$types[0]}}) { 
+				my $new_dom_node = $dom_node->cloneNode(1);
+				$dom_list_node->appendChild($new_dom_node);
+			}
+			#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$types[0]"]})->get_node(1);
+
+			my $dp_cdc_XPath = qq{domain_parse[\@type="$types[0]"]/chain_domain_coverage};
+			my $dp_cdc_node;
+
+			my $dp_ocdc_XPath = qq{domain_parse[\@type="$types[0]"]/optimized_chain_domain_coverage};
+			my $dp_ocdc_node;
+
+			if ($pc_node->exists($dp_cdc_XPath)) { 
+				$dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
+				my $new_cdc_node = $dp_cdc_node->cloneNode(1);
+				$merge_node->appendChild($new_cdc_node);
+			}
+			if ($pc_node->exists($dp_ocdc_XPath)) { 
+				$dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
+				my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
+				$merge_node->appendChild($new_ocdc_node);
+			}
+			
+
+			print "Hello!\n";
+			if ($pc_node->exists("./domain_parse[\@type='$types[0]']/job/special_list")) { 
+				my $pc_special_list_node = $pc_node->findnodes("./domain_parse[\@type='$types[0]']/job/special_list")->get_node(1);
+				my $new_pc_special_list_node = $pc_special_list_node->cloneNode(1);
+				$job_node->appendChild($new_pc_special_list_node);
+			}
+
+		}else{
+			#Take either all the seq_iter or all the struct_search nodes	
+			my @good_types;
+			foreach my $type (@types) { 
+				#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
+				#my $cdc 	= $dp_node->findvalue('chain_domain_coverage');	
+
+				my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
+				if ($dp_node->exists('optimized_chain_domain_coverage')) { 
+					my $ocdc = $dp_node->findvalue('optimized_chain_domain_coverage/@unused_res');
+					if ($ocdc && $ocdc <= 25 ) {  # ==0 to <= 25 Thursday, May 09 2013
+						push (@good_types, $type);
+					}
+				}
+			}
+			
+			my $default1 = 'struct_search';
+			my $default2 = 'seq_iter';
+			my $use_type;
+			if (scalar(@good_types) == 2)  { 
+				$use_type = $default1;
+			}elsif(scalar(@good_types) == 1) { 
+				$use_type = $good_types[0];
+			}else{
+				$use_type = $default2;
+			}
+
+			#my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$use_type"]})->get_node(1);
+
+			my $dp_cdc_XPath = qq{domain_parse[\@type="$use_type"]/chain_domain_coverage};
+			my $dp_cdc_node;
+
+			my $dp_ocdc_XPath = qq{domain_parse[\@type="$use_type"]/optimized_chain_domain_coverage};
+			my $dp_ocdc_node;
+
+			if ($pc_node->exists($dp_cdc_XPath)) { 
+				$dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
+				
+			}else{
+				$dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
+				$dp_cdc_node->appendTextNode('0');
+			}
+			my $new_cdc_node = $dp_cdc_node->cloneNode(1);
+
+			if ($pc_node->exists($dp_ocdc_XPath)) { 
+				$dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
+			}else{
+				$dp_ocdc_node = $domain_summary_doc->createElement('optimized_chain_domain_coverage');
+				$dp_ocdc_node->setAttribute('used_res', 0);
+				$dp_ocdc_node->appendTextNode('0');
+			}
+			my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
+
+			foreach my $dom_node ( @{$dp_domains{$use_type}}) { 
+				my $new_dom_node = $dom_node->cloneNode(1);
+				$dom_list_node->appendChild($new_dom_node);
+			}
+			
+			if ($pc_node->exists("domain_parse[\@type='$use_type']/job/special_list")) { 
+				my $pc_special_list_node = $pc_node->findnodes("domain_parse[\@type='$use_type']/job/special_list")->get_node(1);
+				my $new_pc_special_list_node = $pc_special_list_node->cloneNode(1);
+				$job_node->appendChild($new_pc_special_list_node);
+
+			}
+
+
+			$merge_node->appendChild($new_cdc_node);
+			$merge_node->appendChild($new_ocdc_node);
+		}
+		$pc_node->appendChild($merge_node);
+	}
+	
+}
+		
+sub run_process_v2 { 
+	my $sub = 'run_process_v2';
+
+	my ($run_list_href, $output_directory) = @_;
+
+	my $id	= $$run_list_href{id};
+	my $run_list_file	= $$run_list_href{run_list_file};
+	my $run_list_label	= $$run_list_href{run_list_label};
+	my $domain_prefix	= $$run_list_href{domain_prefix};
+	my $run_list_mode	= $$run_list_href{mode};			
+	my $reference		= $$run_list_href{reference};
+
+	my $run_list_desc = $$run_list_href{run_list_desc};
+
+	if ($DEBUG) { 
+		print "DEBUG $sub: $id $run_list_label $run_list_file\n";
+	}
+
+	if (!-f $run_list_file) { 
+		print "WARNING! $run_list_file not found, skipping...\n";
+		return 0;
+	}
+
+	my $run_list_xml_doc = xml_open($run_list_file);
+
+	#Create the document that holds all the data for a run
+	my ($domain_summary_doc, $domain_summary_top_node) = xml_create('domain_parse_summary');
+
+	#Copy the run_list_summary head data to the domain summary file
+	$domain_summary_top_node->appendTextChild('domain_summary_run_list_file', $run_list_file);
+	$domain_summary_top_node->appendTextChild('domain_summary_run_list_label', $run_list_label);
+	$domain_summary_top_node->appendTextChild('domain_summary_run_list_description', $run_list_desc);
+
+	#Head node for chain list
+	my $ds_chain_list_node = $domain_summary_doc->createElement('pdb_chain_list');
+	$domain_summary_top_node->appendChild($ds_chain_list_node);
+
+	#Go read the run_list summary, the associated hora job list summaries, and the associate domain xmls and build
+	my $run_list_XPath = '//domain_parse_run_list/domain_parse_run';
+
+	#ref library read
+	my $ref_domain_list = reference_domain_cache_load($reference);
+
+	if ($run_list_xml_doc->exists($run_list_XPath)) { 
+		my $run_list_nodes = $run_list_xml_doc->findnodes($run_list_XPath);
+
+		foreach my $run_node ($run_list_nodes->get_nodelist() ) { 
+			my $run_list_dir	= $run_node->findvalue('run_list_dir');
+			my $run_id 			= $run_node->findvalue('@run_id');
+			my $week_label 		= $run_node->findvalue('week_label');
+
+			if ($DEBUG) { 
+				print "DEBUG $sub: $run_id $run_list_dir\n";
+			}
+			if (!-d $run_list_dir) { 
+				print "WARNING! $sub: id $id dir $run_list_dir not found, skipping...\n";
+				next;
+			}
+			foreach my $jx_file_node ($run_node->findnodes('run_list_job_xml_file')->get_nodelist() ) { 
+				my $run_mode = $jx_file_node->findvalue('@mode');
+				if ($DEBUG ) { 
+					print "DEBUG $sub: $run_id $run_mode\n";
+				}
+				#domain_mode_process_v2($domain_summary_doc, $ref_xml_doc, $run_mode, $reference, $run_node, $run_list_dir, $run_list_label, $domain_prefix);
+				domain_mode_process_v2($domain_summary_doc, $ref_domain_list, $run_mode, $reference, $run_node, $run_list_dir, $run_list_label, $domain_prefix);
+			}
+			#Merge domain parse jobs into a single category, seq_iter only, struct_search only, and mixed. Relabel domain IDs 
+			#domain_merge($domain_summary_doc, $week_label);
+			#Only use all of one type
+			domain_merge_v2($domain_summary_doc, $reference, $week_label);
+		}
+		add_week_list($domain_summary_doc);
+		
+		#Postprocess ranges, renumber domains, label
+		#domain_simple_postprocess($domain_summary_doc);
+
+	}else{
+		print "WARNING! $run_list_file doesn't have XPath $run_list_XPath, skipping...\n";
+		return 0;
+	}
+	my $domain_summary_file_name = "$output_directory/$run_list_label.$domain_prefix.domain_summary.xml";
+	xml_write($domain_summary_doc, $domain_summary_file_name);	
+
+	return $domain_summary_file_name;
+}
+
 
 sub hh_result_parse { 
 	my $sub = 'hh_result_parse';
@@ -397,8 +928,9 @@ sub hh_result_parse {
 
 							#Output template struct_seqid and struct_pdb ranges
 							$template_struct_seqid_range 	 = multi_chain_rangify($template_aligned_seqid_range_aref, $template_aligned_chain_aref);
-							print "tssr??$template_struct_seqid_range\n";
+							print "tssr?? $template_struct_seqid_range\n";
 							$template_struct_pdb_range	 = multi_chain_pdb_rangify($template_aligned_seqid_range_aref, $ecod_pdbnum_href, $template_aligned_chain_aref);
+							print "tspr?? $template_struct_pdb_range\n";
 
 							#Template coverage should be number of aligned positions / total number of tmeplate positions
 
@@ -450,20 +982,27 @@ sub hh_result_parse {
 								last;
 							} 
 							#Output tmeplate struct_seqid and struct_pdb ranges
-							print "foo $ecod_domain_id\t";
+							print "foo $ecod_domain_id\n";
 							$template_struct_seqid_range 	= multi_chain_rangify($template_aligned_seqid_aref, $template_aligned_chain_aref);
 							$template_struct_pdb_range	    = multi_chain_pdb_rangify($template_aligned_seqid_aref, $ecod_pdbnum_href, $template_aligned_chain_aref);
 							print "tssr: $template_struct_seqid_range, tspr: $template_struct_pdb_range\n";
-							print "bar\n";
 
 							#$template_coverage 		= region_coverage(\@template_seqid, $template_aligned_seqid_aref);
-							$template_coverage		= multi_chain_region_coverage(\@template_seqid, \@template_chain, $template_aligned_seqid_aref, $template_aligned_chain_aref);
-							my $ungapped_template_struct_seqid_range = multi_chain_ungap_range($template_struct_seqid_range, $GAP_TOL);
-							my ($ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref) = multi_chain_range_expand($ungapped_template_struct_seqid_range);
-							$ungapped_template_coverage = multi_chain_region_coverage(\@template_seqid, \@template_chain, $ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref);
-							printf "tc: %0.2f utc: %0.2f\n", $template_coverage, $ungapped_template_coverage;
 
-
+							if (scalar @template_seqid > 0 && scalar @template_chain > 0 && scalar @$template_aligned_seqid_aref > 0 && scalar @$template_aligned_chain_aref > 0) { 
+								printf "%i %i %i %i\n", scalar @template_seqid, scalar @template_chain, scalar @$template_aligned_seqid_aref, scalar @$template_aligned_chain_aref;
+								$template_coverage		= multi_chain_region_coverage(\@template_seqid, \@template_chain, $template_aligned_seqid_aref, $template_aligned_chain_aref);
+								my $ungapped_template_struct_seqid_range = multi_chain_ungap_range($template_struct_seqid_range, $GAP_TOL);
+								print "utssr: $ungapped_template_struct_seqid_range\n";
+								my ($ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref) = multi_chain_range_expand($ungapped_template_struct_seqid_range);
+								printf "%i %i %i %i\n", scalar @template_seqid, scalar @template_chain, scalar @$ungapped_template_struct_seqid_aref, scalar @$ungapped_template_struct_chain_aref;
+								$ungapped_template_coverage = multi_chain_region_coverage(\@template_seqid, \@template_chain, $ungapped_template_struct_seqid_aref, $ungapped_template_struct_chain_aref);
+								printf "tc: %0.2f utc: %0.2f\n", $template_coverage, $ungapped_template_coverage;
+							}else{
+								print "WARNING! Template coverage not understood\n";
+								$template_coverage = 'NaN';
+								$ungapped_template_coverage = 'NaN';
+							}
 						}
 
 						if ($template_coverage < 0.7) { 
@@ -485,7 +1024,7 @@ sub hh_result_parse {
 						$template_pdb_range_node->appendTextNode($template_struct_pdb_range);
 						$hh_hit_node->appendChild($template_pdb_range_node);
 						$template_pdb_range_node->setAttribute('coverage', $template_coverage);
-						$template_seqid_range_node->setAttribute('ungapped_coverage', $ungapped_template_coverage);
+						$template_pdb_range_node->setAttribute('ungapped_coverage', $ungapped_template_coverage);
 
 						#define
 						last;
@@ -956,10 +1495,7 @@ sub blast_process_v2 {
 		print "DEBUG $sub top\n";
 	}
 
-	my $xml_fh;
-	open ($xml_fh, $blast_xml) or die "Could not open $blast_xml for reading:$!\n";
-	my $blast_xml_doc = XML::LibXML->load_xml( IO => $xml_fh, load_ext_dtd => 0 );
-	close $xml_fh;
+	my $blast_xml_doc = xml_open($blast_xml);
 
 	my $bs_run_node	= $bs_doc->createElement('blast_run');
 
@@ -1018,8 +1554,6 @@ sub blast_process_v2 {
 			$hit_meta{pdb_id} 		= $hit_pdb;
 			$hit_meta{chain_id} 	= $hit_chain;
 
-			
-
 			my $hit_hsps_nodes = $hit_node->findnodes('Hit_hsps/Hsp');
 
 			#if ($hit_hsps_nodes->size() > 1) { next } 
@@ -1069,7 +1603,7 @@ sub blast_process_v2 {
 				my $used_query_residues = residue_coverage(\@hsp_query_seqid, \@used_query_seqid);
 				my $used_hit_residues 	= residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
 
-				print "$hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
+				print "HSP_SEG $hit_num $hit_def $hsp_num $hsp_evalue $hsp_query_from $hsp_query_to\n";
 				#v1 5 used 5 unused
 				#v2 10 used 5 unused
 				if ($DEBUG) { 
@@ -1085,10 +1619,10 @@ sub blast_process_v2 {
 					#Assumes N-terminal extension of hit and query sequence in multi HSP hits
 					#This is very hacky, assumes much about quality of hsp overlap
 					$hsp_overlap += residue_coverage(\@hsp_hit_seqid, \@used_hit_seqid);
-#					if ($hsp_overlap > 0) { 
+					if ($hsp_overlap > 0) { 
 #						my $before = rangify(@hsp_hit_seqid);
 #						my $before2 = rangify(@hsp_query_seqid);
-#						print "WARNING! hsp_overlap, $hsp_overlap\n";
+						print "WARNING! hsp_overlap, $hsp_overlap\n";
 #						for (my $i = 0; $i < $hsp_overlap; $i++) { 
 #							my $removed_query = shift(@hsp_query_seqid);
 #							my $removed_hit = shift(@hsp_hit_seqid);
@@ -1099,7 +1633,7 @@ sub blast_process_v2 {
 #						my $after2 = rangify(@hsp_query_seqid);
 #				
 #
-#					}
+					}
 					my $tmp_query_segs = rangify(@hsp_query_seqid);
 					my $tmp_hit_segs = rangify(@hsp_hit_seqid);
 
@@ -1122,6 +1656,10 @@ sub blast_process_v2 {
 						my %hsp_meta;
 						$hsp_meta{hsp_count} = $hsp_count;
 						$hsp_meta{hsp_overlap} = $hsp_overlap;
+
+						my $tmp_query_segs_range = join(",", @query_segs);
+						my $tmp_hit_segs_range = join(",", @hit_segs);
+						print "???? $tmp_query_segs_range $tmp_hit_segs_range\n";
 
 						define_hit(\@hit_segs, \@query_segs, \@evals, $bs_doc, $bs_hit_list_node, \%hit_meta, \%hsp_meta); 
 						undef @query_segs;
@@ -1166,29 +1704,29 @@ sub define_hit {
 		@$query_seg_aref = sort { $a =~ /(\d+)\-/; my $anum = $1; $b =~ /(\d+)\-/; my $bnum = $1; $anum <=> $bnum } @$query_seg_aref;
 		@$eval_aref = map {$_->[0]} sort {$a->[1] =~ /(\d+)\-/; my $anum = $1; $b->[1] =~ /(\d+)/; my $bnum = $1; $anum <=> $bnum} map { [$eval_map{$_}, $_]} @$hit_seg_aref;
 
-		if ($$hsp_meta_href{hsp_overlap} > 0 && scalar(@$hit_seg_aref) == 2) { 
-			my $hit_seg = pop(@$hit_seg_aref);
-			my $hit_seg_aref = range_expand($hit_seg);
-			my $query_seg = pop(@$query_seg_aref);
-			my $query_seg_aref = range_expand($query_seg);
-
-			for (my $i = 0; $i < $$hsp_meta_href{hsp_overlap}; $i++)  { 
-				my $removed_query = shift(@$query_seg_aref);
-				my $removed_hit = shift(@$hit_seg_aref);
-				#printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@$query_seg_aref), scalar(@$hit_seg_aref);
-			}
-			my $mod_hit_seg = rangify(@$hit_seg_aref);
-			my $mod_query_seg = rangify(@$query_seg_aref);
-			push (@$query_seg_aref, $mod_query_seg);
-			push (@$hit_seg_aref, $mod_hit_seg);
-		}
+#		if ($$hsp_meta_href{hsp_overlap} > 0 && scalar(@$hit_seg_aref) == 2) { 
+#			my $hit_seg = pop(@$hit_seg_aref);
+#			my $hit_seg_aref = range_expand($hit_seg);
+#			my $query_seg = pop(@$query_seg_aref);
+#			my $query_seg_aref = range_expand($query_seg);
+#
+#			for (my $i = 0; $i < $$hsp_meta_href{hsp_overlap}; $i++)  { 
+#				my $removed_query = shift(@$query_seg_aref);
+#				my $removed_hit = shift(@$hit_seg_aref);
+#				printf "\thsp: $removed_query $removed_hit %i %i\n", scalar(@$query_seg_aref), scalar(@$hit_seg_aref);
+#			}
+#			my $mod_hit_seg = rangify(@$hit_seg_aref);
+#			my $mod_query_seg = rangify(@$query_seg_aref);
+#			push (@$query_seg_aref, $mod_query_seg);
+#			push (@$hit_seg_aref, $mod_hit_seg);
+#		}
 
 		my $hit_query_reg = join(",", @$query_seg_aref);
 		my $hit_hit_reg	= join(',', @$hit_seg_aref);
 		my $hit_query_evals = join(",", @$eval_aref);
 		
 		if ($DEBUG) { 
-			print "$$hit_meta_href{num} $$hit_meta_href{domain_id} $hit_query_reg\n";
+			print "->>$$hit_meta_href{num} $$hit_meta_href{domain_id} $hit_query_reg\n";
 		}
 		$bs_hit_node->setAttribute('num', 		$$hit_meta_href{num});
 		$bs_hit_node->setAttribute('domain_id', $$hit_meta_href{domain_id});
@@ -1847,13 +2385,16 @@ sub struct_search_dali_query_gen {
 sub jobify_dali {
     my $sub = 'jobify_dali';
 
-    my ( $dali_dir, $pdb1_fn, $pdb2_fn, $dali_output_fn ) = @_;
+    my ( $dali_dir, $pdb1_fn, $pdb2_fn, $dali_output_fn, $no_chain_id ) = @_;
 
     if ( !-f $DALI_EXE ) {
         die "ERROR! $sub: DALI exe $DALI_EXE not found\n";
     }
     my $job_file = $dali_output_fn;
     $job_file =~ s/dali/job/;
+
+
+	#print "p1: $pdb1_fn p2 : $pdb2_fn\n";
 
     $pdb1_fn =~ /\/([\d\w\_\-\.]+)\.(pdb|ent)/;
     my $name1 = $1;
@@ -1871,13 +2412,20 @@ sub jobify_dali {
     print $fh "#\$ -M dustin.schaeffer\@gmail.com\n";
 	if (`whoami` eq "apache\n") { 
 		print $fh "#\$ -S /bin/bash\n";
+		print $fh "#\$ -v LD_LIBRARY_PATH='/usr7/local/lib64:/usr7/local/lib/:/usr1/local/lib\n";
 	}
     print $fh "#\$ -v LD_LIBRARY_PATH\n";
 	
     print $fh "mkdir $dali_dir/$mixup\n";
     print $fh "cd $dali_dir/$mixup\n";
     print $fh "$DALI_EXE -pairwise $pdb1_fn $pdb2_fn > /dev/null\n";
-    my $DALI_OUTPUT = 'mol1?.result';
+    #my $DALI_OUTPUT = $no_chain_id > 0 ? 'mol1.result' :  'mol1?.result';
+	my $DALI_OUTPUT = 'mol1?.result';
+    #my $DALI_OUTPUT = $no_chain_id > 0 ? 'mol1.result' :  'mol1?.result';
+	if (defined $no_chain_id && $no_chain_id > 0) { 
+		$DALI_OUTPUT = 'mol1.result';
+	}
+	#print "nci: $no_chain_id do: $DALI_OUTPUT\n";
     print $fh "mv $DALI_OUTPUT ../$dali_output_fn\n";
     print $fh "rm -f dali.lock\n";
     print $fh "cd ..\n";
@@ -1924,6 +2472,24 @@ sub immediate_dali {
 
 sub existsMode {
     return $_[0]->exists(qq{run_list_job_xml_file[\@mode="$_[1]"]}) ? 1 : 0;
+}
+
+sub generate_query_pdb_gen_job { 
+	my ($out_fn, $pdb, $chain) = @_;
+
+	my $cmd = "$GENERATE_PDB $out_fn $pdb $chain\n";
+
+	my $job_fn = $out_fn;
+	$job_fn =~ s/\.pdb/.job/;
+	my @s = split (/\//, $job_fn);
+	my $f = pop @s;
+	$f = "gen_" . $f;
+	push (@s, $f);
+	$job_fn = join ('/', @s);
+
+	job_create($job_fn, $cmd);
+
+	return $job_fn;
 }
 
 sub generate_query_pdb {
@@ -2353,417 +2919,15 @@ sub generate_domain_summary_files {
     }
 }
 
-sub run_process_v2 {
-    my $sub = 'run_process_v2';
 
-    my ( $run_list_href, $output_directory ) = @_;
-
-    my $id             = $$run_list_href{id};
-    my $run_list_file  = $$run_list_href{run_list_file};
-    my $run_list_label = $$run_list_href{run_list_label};
-    my $domain_prefix  = $$run_list_href{domain_prefix};
-    my $run_list_mode  = $$run_list_href{mode};
-    my $reference      = $$run_list_href{reference};
-
-    my $run_list_desc = $$run_list_href{run_list_desc};
-
-    if ($DEBUG) {
-        print "DEBUG $sub: $id $run_list_label $run_list_file\n";
-    }
-
-    if ( !-f $run_list_file ) {
-        print "WARNING! $run_list_file not found, skipping...\n";
-        return 0;
-    }
-
-    my $run_list_xml_doc = xml_open($run_list_file);
-
-    #Create the document that holds all the data for a run
-    my ( $domain_summary_doc, $domain_summary_top_node ) = xml_create('domain_parse_summary');
-
-    #Copy the run_list_summary head data to the domain summary file
-    my $ds_run_list_file_node = $domain_summary_doc->createElement('domain_summary_run_list_file');
-    $ds_run_list_file_node->appendTextNode($run_list_file);
-
-    my $ds_run_list_label_node = $domain_summary_doc->createElement('domain_summary_run_list_label');
-    $ds_run_list_label_node->appendTextNode($run_list_label);
-
-    my $ds_run_list_desc_node = $domain_summary_doc->createElement('domain_summary_run_list_description');
-    $ds_run_list_desc_node->appendTextNode($run_list_desc);
-
-    #Head node for chain list
-    my $ds_chain_list_node = $domain_summary_doc->createElement('pdb_chain_list');
-
-    $domain_summary_top_node->appendChild($ds_run_list_file_node);
-    $domain_summary_top_node->appendChild($ds_run_list_label_node);
-    $domain_summary_top_node->appendChild($ds_run_list_desc_node);
-    $domain_summary_top_node->appendChild($ds_chain_list_node);
-
-    #Go read the run_list summary, the associated hora job list summaries, and the associate domain xmls and build
-    my $run_list_XPath = '//domain_parse_run_list/domain_parse_run';
-
-    #ref library read
-    my $ref_domain_list = reference_domain_cache_load($reference);
-
-    if ( $run_list_xml_doc->exists($run_list_XPath) ) {
-        my $run_list_nodes = $run_list_xml_doc->findnodes($run_list_XPath);
-
-        foreach my $run_node ( $run_list_nodes->get_nodelist() ) {
-            my $run_list_dir = $run_node->findvalue('run_list_dir');
-            my $run_id       = $run_node->findvalue('@run_id');
-            my $week_label   = $run_node->findvalue('week_label');
-
-            if ($DEBUG) {
-                print "DEBUG $sub: $run_id $run_list_dir\n";
-            }
-            if ( !-d $run_list_dir ) {
-                print "WARNING! $sub: id $id dir $run_list_dir not found, skipping...\n";
-                next;
-            }
-            foreach my $jx_file_node ( $run_node->findnodes('run_list_job_xml_file')->get_nodelist() ) {
-                my $run_mode = $jx_file_node->findvalue('@mode');
-                if ($DEBUG) {
-                    print "DEBUG $sub: $run_id $run_mode\n";
-                }
-
-#domain_mode_process_v2($domain_summary_doc, $ref_xml_doc, $run_mode, $reference, $run_node, $run_list_dir, $run_list_label, $domain_prefix);
-                domain_mode_process_v2( $domain_summary_doc, $ref_domain_list, $run_mode, $reference,
-                    $run_node, $run_list_dir, $run_list_label, $domain_prefix );
-            }
-
-       #Merge domain parse jobs into a single category, seq_iter only, struct_search only, and mixed. Relabel domain IDs
-       #domain_merge($domain_summary_doc, $week_label);
-       #Only use all of one type
-            domain_merge_v2( $domain_summary_doc, $reference, $week_label );
-        }
-        add_week_list($domain_summary_doc);
-
-        #Postprocess ranges, renumber domains, label
-        #domain_simple_postprocess($domain_summary_doc);
-
-    }
-    else {
-        print "WARNING! $run_list_file doesn't have XPath $run_list_XPath, skipping...\n";
-        return 0;
-    }
-    my $domain_summary_file_name = "$output_directory/$run_list_label.$domain_prefix.domain_summary.xml";
-
-    xml_write( $domain_summary_doc, $domain_summary_file_name );
-    return $domain_summary_file_name;
-}
 
 sub hasDomains {
     $_[0]->exists('.//domain');
 }
 
-sub domain_merge_v2 {
-    my $sub = 'domain_merge_v2';
 
-    my ( $domain_summary_doc, $reference, $week_label ) = @_;
 
-    my $pdb_chain_XPath = qq{//pdb_chain[\@week_label='$week_label']};
 
-    if ($DEBUG) {
-        print "DEBUG $sub: $reference $week_label\n";
-    }
-
-    foreach my $pc_node ( $domain_summary_doc->findnodes($pdb_chain_XPath)->get_nodelist() ) {
-
-        my $pdb   = $pc_node->findvalue('@pdb');
-        my $chain = $pc_node->findvalue('@chain');
-
-        my @types;
-        my %dp_domains;
-        foreach my $dp_node ( $pc_node->findnodes('domain_parse') ) {
-
-            my $type = $dp_node->findvalue('@type');
-
-            next if !hasDomains($dp_node);
-
-            push( @types, $type );
-
-            foreach my $dom_node ( $dp_node->findnodes('job/domain_list/domain') ) {
-                push( @{ $dp_domains{$type} }, $dom_node );
-            }
-
-        }
-
-        my $merge_node = $domain_summary_doc->createElement('domain_parse');
-        $merge_node->setAttribute( 'type', 'merge' );
-
-        my $job_node = $domain_summary_doc->createElement('job');
-        $job_node->setAttribute( 'mode',      'merge' );
-        $job_node->setAttribute( 'reference', $reference );
-
-        $merge_node->appendChild($job_node);
-
-        my $dom_list_node = $domain_summary_doc->createElement('domain_list');
-        $job_node->appendChild($dom_list_node);
-
-        my $good_types;
-        if ( scalar(@types) == 1 ) {
-            foreach my $dom_node ( @{ $dp_domains{ $types[0] } } ) {
-                my $new_dom_node = $dom_node->cloneNode(1);
-                $dom_list_node->appendChild($new_dom_node);
-            }
-
-            #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$types[0]"]})->get_node(1);
-
-            my $dp_cdc_XPath = qq{domain_parse[\@type="$types[0]"]/chain_domain_coverage};
-            my $dp_cdc_node;
-
-            my $dp_ocdc_XPath = qq{domain_parse[\@type="$types[0]"]/optimized_chain_domain_coverage};
-            my $dp_ocdc_node;
-
-            if ( $pc_node->exists($dp_cdc_XPath) ) {
-                $dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
-                $dp_cdc_node->appendTextNode('0');
-            }
-
-            if ( $pc_node->exists($dp_ocdc_XPath) ) {
-                $dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_ocdc_node = $domain_summary_doc->createElement('optimized_chain_domain_coverage');
-                $dp_ocdc_node->setAttribute( 'used_res', '0' );
-            }
-            my $new_cdc_node  = $dp_cdc_node->cloneNode(1);
-            my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
-
-            $merge_node->appendChild($new_cdc_node);
-            $merge_node->appendChild($new_ocdc_node);
-        }
-        else {
-            #Take either all the seq_iter or all the struct_search nodes
-            my @good_types;
-            foreach my $type (@types) {
-
-                #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
-                #my $cdc 	= $dp_node->findvalue('chain_domain_coverage');
-
-                my $dp_node = $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
-                if ( $dp_node->exists('optimized_chain_domain_coverage') ) {
-                    my $ocdc = $dp_node->findvalue('optimized_chain_domain_coverage/@unused_res');
-                    if ( $ocdc && $ocdc <= 25 ) {    # ==0 to <= 25 Thursday, May 09 2013
-                        push( @good_types, $type );
-                    }
-                }
-            }
-
-            my $default1 = 'struct_search';
-            my $default2 = 'seq_iter';
-            my $use_type;
-            if ( scalar(@good_types) == 2 ) {
-                $use_type = $default1;
-            }
-            elsif ( scalar(@good_types) == 1 ) {
-                $use_type = $good_types[0];
-            }
-            else {
-                $use_type = $default2;
-            }
-
-            #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$use_type"]})->get_node(1);
-
-            my $dp_cdc_XPath = qq{domain_parse[\@type="$use_type"]/chain_domain_coverage};
-            my $dp_cdc_node;
-
-            my $dp_ocdc_XPath = qq{domain_parse[\@type="$use_type"]/optimized_chain_domain_coverage};
-            my $dp_ocdc_node;
-
-            if ( $pc_node->exists($dp_cdc_XPath) ) {
-                $dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
-
-            }
-            else {
-                $dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
-                $dp_cdc_node->appendTextNode('0');
-            }
-            my $new_cdc_node = $dp_cdc_node->cloneNode(1);
-
-            if ( $pc_node->exists($dp_ocdc_XPath) ) {
-                $dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_ocdc_node = $domain_summary_doc->createElement('optimized_chain_domain_coverage');
-                $dp_ocdc_node->setAttribute( 'used_res', 0 );
-                $dp_ocdc_node->appendTextNode('0');
-            }
-            my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
-
-            foreach my $dom_node ( @{ $dp_domains{$use_type} } ) {
-
-                my $new_dom_node = $dom_node->cloneNode(1);
-                $dom_list_node->appendChild($new_dom_node);
-            }
-            $merge_node->appendChild($new_cdc_node);
-            $merge_node->appendChild($new_ocdc_node);
-        }
-        $pc_node->appendChild($merge_node);
-    }
-
-    $pdb_chain_XPath = qq{//pdb_chains[\@week_label='$week_label']};
-
-    foreach my $pc_node ( $domain_summary_doc->findnodes($pdb_chain_XPath)->get_nodelist() ) {
-
-        my $pdb   = $pc_node->findvalue('@pdb');
-        my $chain = $pc_node->findvalue('@chain');
-
-        my @types;
-        my %dp_domains;
-        foreach my $dp_node ( $pc_node->findnodes('domain_parse') ) {
-
-            my $type = $dp_node->findvalue('@type');
-
-            if ( !$dp_node->exists('job_asm/domain_list/domain') ) { next }
-
-            push( @types, $type );
-
-            foreach my $dom_node ( $dp_node->findnodes('job_asm/domain_list/domain') ) {
-                push( @{ $dp_domains{$type} }, $dom_node );
-            }
-
-        }
-
-        my $merge_node = $domain_summary_doc->createElement('domain_parse');
-        $merge_node->setAttribute( 'type', 'merge' );
-
-        my $job_node = $domain_summary_doc->createElement('job');
-        $job_node->setAttribute( 'mode',      'merge' );
-        $job_node->setAttribute( 'reference', $reference );
-
-        $merge_node->appendChild($job_node);
-
-        my $dom_list_node = $domain_summary_doc->createElement('domain_list');
-        $job_node->appendChild($dom_list_node);
-
-        my $good_types;
-        if ( scalar(@types) == 1 ) {
-            foreach my $dom_node ( @{ $dp_domains{ $types[0] } } ) {
-                my $new_dom_node = $dom_node->cloneNode(1);
-                $dom_list_node->appendChild($new_dom_node);
-            }
-
-            #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$types[0]"]})->get_node(1);
-
-            my $dp_cdc_XPath = qq{domain_parse[\@type="$types[0]"]/chain_domain_coverage};
-            my $dp_cdc_node;
-
-            my $dp_ocdc_XPath = qq{domain_parse[\@type="$types[0]"]/optimized_chain_domain_coverage};
-            my $dp_ocdc_node;
-
-            if ( $pc_node->exists($dp_cdc_XPath) ) {
-                $dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
-                $dp_cdc_node->appendTextNode('0');
-            }
-
-            if ( $pc_node->exists($dp_ocdc_XPath) ) {
-                $dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_ocdc_node = $domain_summary_doc->createElement('optimized_chain_domain_coverage');
-                $dp_ocdc_node->setAttribute( 'used_res', '0' );
-            }
-            my $new_cdc_node  = $dp_cdc_node->cloneNode(1);
-            my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
-
-            $merge_node->appendChild($new_cdc_node);
-            $merge_node->appendChild($new_ocdc_node);
-        }
-        else {
-            #Take either all the seq_iter or all the struct_search nodes
-            my @good_types;
-            foreach my $type (@types) {
-
-                #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
-                #my $cdc 	= $dp_node->findvalue('chain_domain_coverage');
-
-                my $dp_node = $pc_node->findnodes(qq{domain_parse[\@type="$type"]})->get_node(1);
-                if ( $dp_node->exists('optimized_chain_domain_coverage') ) {
-                    my $ocdc = $dp_node->findvalue('optimized_chain_domain_coverage/@unused_res');
-                    if ( $ocdc && $ocdc <= 25 ) {    # ==0 to <= 25 Thursday, May 09 2013
-                        push( @good_types, $type );
-                    }
-                }
-            }
-
-            my $default1 = 'struct_search';
-            my $default2 = 'seq_iter';
-            my $use_type;
-            if ( scalar(@good_types) == 2 ) {
-                $use_type = $default1;
-            }
-            elsif ( scalar(@good_types) == 1 ) {
-                $use_type = $good_types[0];
-            }
-            else {
-                $use_type = $default2;
-            }
-
-            #my $dp_node 	= $pc_node->findnodes(qq{domain_parse[\@type="$use_type"]})->get_node(1);
-
-            my $dp_cdc_XPath = qq{domain_parse[\@type="$use_type"]/chain_domain_coverage};
-            my $dp_cdc_node;
-
-            my $dp_ocdc_XPath = qq{domain_parse[\@type="$use_type"]/optimized_chain_domain_coverage};
-            my $dp_ocdc_node;
-
-            if ( $pc_node->exists($dp_cdc_XPath) ) {
-                $dp_cdc_node = $pc_node->findnodes($dp_cdc_XPath)->get_node(1);
-
-            }
-            else {
-                $dp_cdc_node = $domain_summary_doc->createElement('chain_domain_coverage');
-                $dp_cdc_node->appendTextNode('0');
-            }
-            my $new_cdc_node = $dp_cdc_node->cloneNode(1);
-
-            if ( $pc_node->exists($dp_ocdc_XPath) ) {
-                $dp_ocdc_node = $pc_node->findnodes($dp_ocdc_XPath)->get_node(1);
-            }
-            else {
-                $dp_ocdc_node = $domain_summary_doc->createElement('optimized_chain_domain_coverage');
-                $dp_ocdc_node->setAttribute( 'used_res', 0 );
-                $dp_ocdc_node->appendTextNode('0');
-            }
-            my $new_ocdc_node = $dp_ocdc_node->cloneNode(1);
-
-            foreach my $dom_node ( @{ $dp_domains{$use_type} } ) {
-
-                my $new_dom_node = $dom_node->cloneNode(1);
-                $dom_list_node->appendChild($new_dom_node);
-            }
-            $merge_node->appendChild($new_cdc_node);
-            $merge_node->appendChild($new_ocdc_node);
-        }
-        $pc_node->appendChild($merge_node);
-    }
-
-}
-
-sub reference_library_load {
-    my $sub = 'reference_library_load';
-
-    my ($reference) = @_;
-
-    my $ref_loc;
-    if ( $REF_XML{$reference} && -f $REF_XML{$reference} ) {
-        $ref_loc = $REF_XML{$reference};
-    }
-    else {
-        die "ERROR! $sub: no ref $reference\n";
-    }
-
-    my $ref_xml_doc = xml_open($ref_loc);
-
-    return $ref_xml_doc;
-}
 
 sub reference_domain_cache_load {
     my $sub = 'reference_domain_cache_load';
@@ -3387,6 +3551,34 @@ sub domain_mode_process_v2 {
 
                     $ds_coil_list_node->appendChild($coil_node);
                 }
+				
+				my $ds_special_list_node;
+				if (!$ds_job_node->exists('special_list')) { 
+					$ds_special_list_node = $domain_summary_doc->createElement('special_list');
+					$ds_job_node->appendChild($ds_special_list_node);
+				}else{
+					die "ERROR! $sub: Special list already exists for $job_inx, $query_pdb, $query_chain, $run_list_dir?\n";
+				}
+				#Find DB special architectures range
+				my $dbh = db_connect('ecod');
+				my $special_sth = $dbh->prepare('SELECT uid, seqid_range, type FROM special WHERE pdb = ? and chain = ?');
+				$special_sth->execute($query_pdb, $query_chain);
+
+				while (my $row_aref = $special_sth->fetchrow_arrayref() ) { 
+					my $uid			= $$row_aref[0];
+					next unless $$row_aref[1] =~ /\d+/;
+					my ($seqid_range, $chain_str) = scop_range_split($$row_aref[1]);
+					my $type		= $$row_aref[2];
+
+					my $special_node = $domain_summary_doc->createElement('special');
+					$special_node->setAttribute('uid', $uid);
+					$special_node->setAttribute('type', $type);
+					$special_node->appendTextChild('seqid_range', $seqid_range);
+
+					$ds_special_list_node->appendChild($special_node);
+				}
+
+
             }
             else {
                 print "ERROR! $sub: Fouled XPath/broken domain XML for top node on $domain_xml_file\n";
@@ -3722,7 +3914,7 @@ sub register_repair {
 sub buildali_hhblits {
     my $sub = 'buildali_hhblits';
 
-    my ( $job_xml_fn, $use_reps ) = @_;
+    my ( $job_xml_fn, $use_reps, $use_cache ) = @_;
 
     print "DEBUG: $sub $job_xml_fn\n";
 
@@ -3730,6 +3922,8 @@ sub buildali_hhblits {
 
     my ( $job_dump_dir, $job_list_dir ) = get_job_dirs_from_job_xml($job_xml_doc);
     my $job_list_nodes = find_job_nodes($job_xml_doc);
+
+	my $cache_dir = $CHAIN_DATA_DIR; 
 
     my $reps = 0;
     if ( $job_xml_doc->exists('//@rep95') ) { $reps = 1 }
@@ -3740,6 +3934,7 @@ sub buildali_hhblits {
         if ( $use_reps && $reps && $node->findvalue('@rep95') ne 'true' ) {
             next;
         }
+
 
         #if ($node->findvalue('@poor') ne 'true') { next }
 
@@ -3752,6 +3947,8 @@ sub buildali_hhblits {
         my $query_chain  = $node->findvalue('query_chain');
         my $pdb_chain    = $query_pdb . "_" . $query_chain;
 
+		my $two = substr($query_pdb, 1, 2);
+
         if ( $node->findvalue('@type') eq 'recurse' ) {
             my $seqid_range       = $node->findvalue('seqid_range');
             my $clean_seqid_range = $seqid_range;
@@ -3762,14 +3959,18 @@ sub buildali_hhblits {
 
         my $fa_file = "$job_dump_dir/$pdb_chain/$pdb_chain.fa";
 
+
         if ( !-f $fa_file ) {
             print "WARNING! No FA file ($fa_file) for $query_pdb $query_chain\n";
             next;
         }
 
         my $a3m_file = "$job_dump_dir/$pdb_chain/$pdb_chain.a3m";
+		if ($use_cache) { 
+			$a3m_file = "$cache_dir/$two/$pdb_chain/$pdb_chain.a3m";
+		}
         my $new_a3m  = $a3m_file;
-        $new_a3m =~ s/a3m/remake.a3m/;
+#        $new_a3m =~ s/a3m/remake.a3m/;
 
         my $new_hhm = $new_a3m;
         $new_hhm =~ s/a3m/hhm/;
@@ -3786,6 +3987,9 @@ sub buildali_hhblits {
             push( @jobs, $hhblits_command );
         }
 
+		if ($use_cache) { 
+			symlink($new_hhm, "$job_dump_dir/$pdb_chain/$pdb_chain.hhm");
+		}
         #		if (! -f $new_hhm ) {
         #			my $hhmake_command = "$HHMAKE_EXE -i $new_a3m";
         #			push (@jobs, $hhmake_command);
@@ -3814,7 +4018,6 @@ sub buildali_hhblits {
 
         my $query_pdb    = $node->findvalue('query_pdb');
         my $query_lc_pdb = lc($query_pdb);
-
         my $query_chains = $node->findvalue('query_chains');
         my $chain_str    = $query_chains;
         $chain_str =~ s/,/_/g;
@@ -3831,7 +4034,7 @@ sub buildali_hhblits {
         }
 
         my $a3m_file = "$job_dump_dir/$pdb_chains/$pdb_chains.a3m";
-        $a3m_file =~ s/a3m/remake.a3m/;
+        #$a3m_file =~ s/a3m/remake.a3m/;
         my $new_hhm = $a3m_file;
         $new_hhm =~ s/a3m/hhm/;
         my $job_fn = "$job_dump_dir/$pdb_chains/hh.$pdb_chains.job";
@@ -3963,8 +4166,10 @@ sub hh_run {
     }
     my @job_ids;
     foreach my $node ( $job_nodes->get_nodelist() ) {
+		my ($pdb_id, $chain_id) = get_pdb_chain($node);
 
         if ( $reps && $use_reps && $node->findvalue('@rep95') ne 'true' ) {
+			print "Not rep! $pdb_id $chain_id\n";
             next;
         }
 
@@ -4001,14 +4206,12 @@ sub hh_run {
         my $ecod_dir = "$job_dump_dir/$pdb_chain";
 
         #my $a3m_fn = "$pdb_chain.a3m";
-        my $a3m_fn = "$pdb_chain.remake.a3m";
-        if ( !-f "$ecod_dir/$a3m_fn" ) {
-            print "WARNING! a3m file $ecod_dir/$a3m_fn not found\n";
+        my $hhm_fn = "$pdb_chain.hhm";
+        if ( !-f "$ecod_dir/$hhm_fn" ) {
+            print "WARNING! hhm file $ecod_dir/$hhm_fn not found\n";
             next;
         }
 
-        my $hhm_fn = $a3m_fn;
-        $hhm_fn =~ s/a3m/hhm/;
 
         my $job_fn = "$job_dump_dir/$pdb_chain/hh.$pdb_chain.job";
         my @jobs;
@@ -4037,7 +4240,9 @@ sub hh_run {
             job_create( $job_fn, \@jobs );
             my $job_id = qsub($job_fn);
             push( @job_ids, $job_id );
-        }
+        }else{
+			print "HHsearch $hhm_fn found\n";
+		}
     }
     return ( \@job_ids );
 }
@@ -4125,14 +4330,11 @@ sub hh_parse {
 
         my $ecod_dir = "$job_dump_dir/$pdb_chain";
 
-        my $a3m_fn = "$pdb_chain.remake.a3m";
-        if ( !-f "$ecod_dir/$a3m_fn" ) {
-            print "WARNING! a3m file $ecod_dir/$a3m_fn not found\n";
+        my $hhm_fn = "$pdb_chain.hhm";
+		if (!-f "$ecod_dir/$hhm_fn") { 
+            print "WARNING! a3m file $ecod_dir/$hhm_fn not found\n";
             next;
-        }
-
-        my $hhm_fn = $a3m_fn;
-        $hhm_fn =~ s/a3m/hhm/;
+		}
 
         my $job_fn = "$job_dump_dir/$pdb_chain/hh_parse.$pdb_chain.job";
         my @jobs;
@@ -4184,14 +4386,51 @@ sub optimize {
         return 0;
     }
     else {
+		my @job_fns;
+		foreach my $job_node ( find_job_nodes($job_xml_doc) ) { 
+			my ( $pdb, $chain, $pdb_chain ) = get_pdb_chain($job_node);
+
+			my $two = substr($pdb, 1, 2);
+
+            my $query_pdb_chain_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.pdb";
+
+			my $cache_pdb_chain_fn = "$CHAIN_DATA_DIR/$two/$pdb_chain/$pdb_chain.pdb";
+
+			if (!-d "$CHAIN_DATA_DIR/$two/$pdb_chain") { 
+				mkdir("$CHAIN_DATA_DIR/$two/$pdb_chain");
+			}
+
+			if ( !-f $cache_pdb_chain_fn || $FORCE_OVERWRITE ) {    #generate query pdb
+                print "gen: $query_pdb_chain_fn\n";
+				my $job_fn = generate_query_pdb_gen_job( $cache_pdb_chain_fn, $pdb, $chain );
+				push (@job_fns, $job_fn);
+            }
+
+			if ( !-f $query_pdb_chain_fn) { 
+				symlink($cache_pdb_chain_fn, $query_pdb_chain_fn);
+			}
+		}
+		my @job_ids;
+		foreach my $job_fn (@job_fns) { 
+			my $job_id = qsub($job_fn);
+			push (@job_ids, $job_id);
+		}
+		while (qstat_wait_list(\@job_ids)) { 
+			sleep(30);
+		}
         foreach my $job_node ( find_job_nodes($job_xml_doc) ) {
 
-            my ( $pdb, $chain ) = get_pdb_chain($job_node);
+            my ( $pdb, $chain, $pdb_chain ) = get_pdb_chain($job_node);
             my $mode = $job_node->findvalue('mode');
 
-            my $pdb_chain = $pdb . "_" . $chain;
+            #my $pdb_chain = $pdb . "_" . $chain;
 
             my $reference = $job_node->findvalue('reference');
+
+			if (!-d "$job_dump_dir/$pdb_chain"){ 
+				warn "WARNING! $job_dump_dir/$pdb_chain dir not found\n";
+				next;
+			}
 
             my $query_pdb_chain_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.pdb";
 
@@ -4667,61 +4906,8 @@ sub job_list_maintain {
     load_partition_vars();
 
     print "#Build FASTA\n";
-    foreach my $job_node ( find_job_nodes($job_xml_doc) ) {
-
-        my ( $query_pdb, $query_chain ) = get_pdb_chain($job_node);
-        my $pdb_chain = $query_pdb . "_" . $query_chain;
-
-        if ( !-d "$job_dump_dir/$pdb_chain" ) {
-            if ( !mkdir("$job_dump_dir/$pdb_chain") ) {
-                die "ERROR! Could not create $job_dump_dir/$pdb_chain\n";
-            }
-            else {
-                chown( $UID, $GID, "$job_dump_dir/$pdb_chain" );
-            }
-        }
-        my $fasta_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.fa";
-
-        if ( -f $fasta_fn && $force_overwrite < 2 ) {
-            print "WARNING! $fasta_fn exists, skipping...\n";
-            next;
-        }
-        else {
-            my ( $seqid_aref, $struct_seqid_aref, $pdbnum_aref, $asym_id ) =
-              pdbml_seq_parse( $query_pdb, $query_chain );
-
-            if (  !$struct_seqid_aref
-                || $struct_seqid_aref == 0
-                || scalar(@$struct_seqid_aref) == 0 )
-            {
-                print "WARNING! No struct_seq for $query_pdb, $query_chain\n";
-                $job_node->setAttribute( 'unstructured', 'true' );
-                next;
-            }
-
-            my $struct_seqid_range    = rangify(@$struct_seqid_aref);
-            my $ungapped_struct_range = ungap_range( $struct_seqid_range, $GAP_TOL );
-            my $ungap_aref            = range_expand($ungapped_struct_range);
-
-            if ( $ungapped_struct_range eq 0 ) {
-                print "WARNING! empty range for $query_pdb, $query_chain\n";
-                next;
-            }
-
-            my $fasta_string = pdbml_fasta_fetch( $query_pdb, $asym_id, $query_chain, $ungap_aref );
-
-            if ( !$fasta_string ) {
-                print "WARNING! No fasta string for $query_pdb, $query_chain\n";
-                next;
-            }
-
-            open( my $fh, ">", $fasta_fn )
-              or die "ERROR! Could not open $fasta_fn for writing:$!\n";
-            print $fh ">$query_pdb,$query_chain\n$fasta_string\n";
-            close $fh;
-        }
-    }
-
+	job_list_generate_fasta_para($job_xml_doc, $force_overwrite);
+	
     if ( $job_xml_doc->exists('//job_asm') ) {
         foreach my $job_asm_node ( find_job_asm_nodes($job_xml_doc) ) {
             my ( $query_pdb, $query_chain_aref ) = get_pdb_chain($job_asm_node);
@@ -4822,13 +5008,12 @@ sub job_list_maintain {
     if ($DEBUG) {
         print "DEBUG: buildali_hhblits: $new_week\n";
     }
-    my $ali_job_ids = buildali_hhblits($job_list_xml_fn);
+    my $ali_job_ids = buildali_hhblits($job_list_xml_fn, 0, 1);
 
     while ( qstat_wait_list($ali_job_ids) ) {
         print "SLEEPING...\n";
         sleep(30);    #5 min job checks;
     }
-
     unless ($no_peptide) {
 
         #Generate peptide filter
@@ -4900,7 +5085,7 @@ sub job_list_maintain {
         print "DEBUG hh: $new_week\n";
     }
 
-    my $hh_run_job_ids = hh_run( $job_list_xml_fn, $reference, 1 );
+    my $hh_run_job_ids = hh_run( $job_list_xml_fn, $reference, 0 );
 
     printf "hhrun %i\n", scalar(@$hh_run_job_ids);
     while ( qstat_wait_list($hh_run_job_ids) ) {
@@ -4912,7 +5097,7 @@ sub job_list_maintain {
         print "DEBUG hh_parse: $new_week\n";
     }
 
-    my $hh_parse_job_ids = hh_parse( $job_list_xml_fn, $reference, 1 );
+    my $hh_parse_job_ids = hh_parse( $job_list_xml_fn, $reference, 0 );
 
     printf "hhparse %i\n", scalar(@$hh_parse_job_ids);
     while ( qstat_wait_list($hh_parse_job_ids) ) {
@@ -4925,7 +5110,7 @@ sub job_list_maintain {
         print "DEBUG bsumm: $new_week\n";
     }
 
-    my $bsumm_job_ids = bsumm( $job_list_xml_fn, 1 );
+    my $bsumm_job_ids = bsumm( $job_list_xml_fn, $reps_only, $force_overwrite );
     printf "bsumm %i\n", scalar(@$bsumm_job_ids);
     while ( qstat_wait_list($bsumm_job_ids) ) {
         print "SLEEPING...\n";
@@ -4938,7 +5123,7 @@ sub job_list_maintain {
         print "DEBUG domains: $new_week\n";
     }
 
-    my $domains_job_ids = domains( $job_list_xml_fn, $reference, 1, $FORCE_OVERWRITE );
+    my $domains_job_ids = domains( $job_list_xml_fn, $reference, $reps_only, $FORCE_OVERWRITE );
     while ( qstat_wait_list($domains_job_ids) ) {
         print "SLEEPING...\n";
         sleep(30);
@@ -5577,7 +5762,7 @@ sub run_list_maintain {
             print "DEBUG bsumm: $new_week\n";
         }
 
-        my $bsumm_job_ids = bsumm( $job_list_xml_fn, 1 );
+        my $bsumm_job_ids = bsumm( $job_list_xml_fn, $reps_only, $FORCE_OVERWRITE );
 
         while ( qstat_wait_list($bsumm_job_ids) ) {
             print "SLEEPING...\n";
@@ -5602,13 +5787,16 @@ sub run_list_maintain {
             print "SLEEPING...\n";
             sleep(30);
         }
+
+		check_job_list_unused_sequence_persistence($job_list_xml_fn, 1);
     }
 
-    generate_struct_search_jobs($run_list_xml_doc);
+    #generate_struct_search_jobs($run_list_xml_doc);
     xml_write( $run_list_xml_doc, $run_list_xml_fn );
 
-    my $DALI_SEARCH = 1;
+    my $DALI_SEARCH = 0;
     if ($DALI_SEARCH) {
+		generate_struct_search_jobs($run_list_xml_doc);
         foreach my $run_node ( $run_list_xml_doc->findnodes('//domain_parse_run') ) {
             if ( existsMode( $run_node, 'struct_search' ) ) {
                 my $run_list_dir    = $run_node->findvalue('run_list_dir');
@@ -5663,6 +5851,128 @@ sub query_glob {
     printf "$sub: Found %i files\n", scalar(@glob_files);
 
     return \@glob_files;
+}
+
+sub job_list_generate_fasta_para { 
+	my $sub = 'job_list_generate_fasta_para';
+
+	my ($job_xml_doc, $force_overwrite) = @_;
+
+	my ($job_dump_dir, $job_list_dir) = get_job_dirs_from_job_xml($job_xml_doc);
+
+	my $chain_top_dir = $CHAIN_DATA_DIR;
+
+	my @jobs;
+	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
+
+		my ($query_pdb, $query_chain, $pdb_chain) = get_pdb_chain($job_node);
+
+		my $two = substr($query_pdb, 1, 2);
+
+		if ( !-d "$chain_top_dir/$two/$pdb_chain/") { 
+			if (!mkdir("$chain_top_dir/$two/$pdb_chain/") ) { 
+				die "ERROR! Could not create $chain_top_dir/$two/$pdb_chain\n";
+			}else{
+				chown( $UID, $GID, "$chain_top_dir/$two/$pdb_chain\n");
+			}
+		}
+
+		if ( !-d "$job_dump_dir/$pdb_chain" ) {
+            if ( !mkdir("$job_dump_dir/$pdb_chain") ) {
+                die "ERROR! Could not create $job_dump_dir/$pdb_chain\n";
+            }
+            else {
+                chown( $UID, $GID, "$job_dump_dir/$pdb_chain" );
+            }
+        }
+        my $fasta_fn = "$chain_top_dir/$two/$pdb_chain/$pdb_chain.fa";
+		my $local_fasta_fn = "$job_dump_dir/$pdb_chain/$pdb_chain.fa";
+        if ( -f $fasta_fn && -f $local_fasta_fn && !$force_overwrite ) {
+            #print "WARNING! $fasta_fn exists, skipping...\n";
+            next;
+        }
+        else {	
+			my $job_fn = generate_fasta_gen_job($fasta_fn, $query_pdb, $query_chain);
+			push (@jobs, $job_fn);
+		}
+
+		if (!-f $local_fasta_fn) { 
+			print "ln $fasta_fn -> $local_fasta_fn\n";
+			symlink($fasta_fn, $local_fasta_fn);
+		}
+	}
+
+	my @job_ids;
+	foreach my $job_fn (@jobs) { 
+		my $job_id = qsub($job_fn);
+		push (@job_ids, $job_id);
+	}
+
+	while (qstat_wait_list(\@job_ids)) { 
+		sleep(30);
+	}
+
+}
+
+sub generate_fasta_gen_job { 
+	my ($fasta_fn, $query_pdb, $query_chain) = @_;
+
+	my $job_fn = $fasta_fn;
+	$job_fn =~ s/\.fa/.job/;
+	my @s = split (/\//, $job_fn);
+	my $f = pop @s;
+	$f = "gen_" . $f;
+	push (@s, $f);
+	$job_fn = join ('/', @s);
+	
+		
+
+	my $cmd = "$GENERATE_FASTA $fasta_fn $query_pdb $query_chain\n";
+
+	job_create($job_fn, $cmd);
+
+	return $job_fn;
+
+}
+
+sub generate_fasta { 
+
+	my ($fasta_fn, $query_pdb, $query_chain) = @_;
+
+	my ( $seqid_aref, $struct_seqid_aref, $pdbnum_aref, $asym_id ) =
+		  pdbml_seq_parse( $query_pdb, $query_chain );
+
+	if (  !$struct_seqid_aref
+		|| $struct_seqid_aref == 0
+		|| scalar(@$struct_seqid_aref) == 0 )
+	{
+		print "WARNING! No struct_seq for $query_pdb, $query_chain\n";
+		#$job_node->setAttribute( 'unstructured', 'true' );
+		return 1;
+	}
+
+	my $struct_seqid_range    = rangify(@$struct_seqid_aref);
+	my $ungapped_struct_range = ungap_range( $struct_seqid_range, $GAP_TOL );
+	my $ungap_aref            = range_expand($ungapped_struct_range);
+
+	if ( $ungapped_struct_range eq 0 ) {
+		print "WARNING! empty range for $query_pdb, $query_chain\n";
+		return 1;
+	}
+
+	my $fasta_string = pdbml_fasta_fetch( $query_pdb, $asym_id, $query_chain, $ungap_aref );
+
+	if ( !$fasta_string ) {
+		print "WARNING! No fasta string for $query_pdb, $query_chain\n";
+		return 1;
+	}
+
+	open( my $fh, ">", $fasta_fn )
+	  or die "ERROR! Could not open $fasta_fn for writing:$!\n";
+	print $fh ">$query_pdb,$query_chain\n$fasta_string\n";
+	close $fh;
+
+	return 0;
 }
 
 sub job_list_generate_fasta {
@@ -6988,6 +7298,7 @@ sub domain_partition {
     $chain_domain_coverage_node->appendTextNode($final_coverage);
     $chain_domain_coverage_node->setAttribute( 'used_res',   scalar @used_seq );
     $chain_domain_coverage_node->setAttribute( 'unused_res', scalar @unused_seq );
+	$chain_domain_coverage_node->setAttribute( 'total_res', scalar @$query_struct_seqid_aref);
     $domain_doc_node->appendChild($chain_domain_coverage_node);
 
     xml_write( $domain_xml_doc, $domain_xml_fn );
@@ -7186,14 +7497,7 @@ sub find_hhsearch_domains {
     if ( $hhsearch_run_nodes_size == 1 ) {
         my $hhsearch_hit_nodes = $hhsearch_run_nodes->get_node(1)->findnodes('hits/hit');
         foreach my $hit_node ( $hhsearch_hit_nodes->get_nodelist() ) {
-            if ( $hit_node->findvalue('@structure_obsolete') eq 'true' ) {
-                print "obsolete hit, skipping\n", next;
-            }
-
-            #if ($hit_node->findvalue('@low_coverage_hit') eq 'true') {
-            #	next;
-            #}
-
+      
             my $hit_num       = $hit_node->findvalue('@num');
             my $hit_domain_id = $hit_node->findvalue('@domain_id');
             if ( $hit_node->findvalue('@structure_obsolete') eq 'true' ) {
@@ -7285,14 +7589,9 @@ sub find_hhsearch_domains {
                 my $domain_id   = "e" . lc($query_pdb) . "$query_chain$domain_count";
                 $domain_node->setAttribute( 'domain_id', $domain_id );
 
-                my $method      = 'hh_full';
-                my $method_node = $domain_xml_doc->createElement('method');
-                $method_node->appendTextNode($method);
-                $domain_node->appendChild($method_node);
-
-                my $struct_seqid_range_node = $domain_xml_doc->createElement('struct_seqid_range');
-                $struct_seqid_range_node->appendTextNode($hit_query_struct_seqid);
-                $domain_node->appendChild($struct_seqid_range_node);
+				$domain_node->appendTextChild('method', 'hh_full');
+				$domain_node->appendTextChild('struct_seqid_range', $hit_query_struct_seqid);
+				$domain_node->appendTextChild('hit_struct_seqid_range', $hit_hit_seqid);
 
                 my $hit_struct_seqid_range_node = $domain_xml_doc->createElement('hit_struct_seqid_range');
                 $hit_struct_seqid_range_node->appendTextNode($hit_hit_seqid);
@@ -8420,6 +8719,9 @@ sub generate_dali_fillin {
 
     #Generate dali jobs for query chain against possible hit uids not used
     my $query_pdb_chain_fn = "$pdb_chain_dump_dir/$query_pdb_chain.pdb";
+	if (! -d $pdb_chain_dump_dir ) { 
+		mdkir($pdb_chain_dump_dir);
+	}
     if ( !-f $query_pdb_chain_fn || $FORCE_OVERWRITE ) {    #generate query pdb
         print "gen: $query_pdb_chain_fn\n";
         generate_query_pdb( $query_pdb_chain_fn, $query_pdb, $query_chain );
@@ -8545,6 +8847,7 @@ sub generate_dali_fillin {
     return $dali_fillin_summ_fn;
 }
 
+
 sub find_dali_fillin_domains {
     my $sub = 'find_dali_fillin_domains';
     my (
@@ -8625,7 +8928,8 @@ sub find_dali_fillin_domains {
 
         my $hit_coverage = $hits[$i]{coverage};
 
-        my $query_domain_seqid_aref = struct_region( range_expand($query_reg), $query_struct_seqid_aref );
+        #my $query_domain_seqid_aref = struct_region( range_expand($query_reg), $query_struct_seqid_aref );
+		my $query_domain_seqid_aref = range_expand($query_reg);
         my $query_domain_seqid_range = ungap_range( rangify(@$query_domain_seqid_aref), $$global_opt{gap_tol} );
         my $query_domain_pdb_range =
           ungap_range( pdb_rangify( $query_domain_seqid_aref, $query_pdbnum_aref ), $$global_opt{gap_tol} );
@@ -8735,6 +9039,105 @@ sub find_dali_fillin_domains {
 
         }
     }
+}
+
+sub check_job_list_unused_sequence_persistence { 
+	my $sub = 'check_unused_sequence_persistence';
+
+	my $job_xml_fn = $_[0];
+	my $write = $_[1];
+
+	my $job_xml_doc = xml_open($job_xml_fn);
+	my ($job_dump_dir, $job_list_dir) = get_job_dirs_from_job_xml($job_xml_doc);
+
+	foreach my $job_node (find_job_nodes($job_xml_doc)) { 
+		my ($pdb_id, $chain_id) = get_pdb_chain($job_node);
+		my $reference = get_reference($job_node);
+		my $pc = $pdb_id . "_". $chain_id;
+		my $domain_fn = "$job_dump_dir/$pc/$DOMAIN_PREFIX.$pc.$reference.xml";
+		print "$pc\n";
+		if (-f $domain_fn) { 
+			if (-f $domain_fn) { 
+				check_unused_sequence_persistence($domain_fn, $write);		
+			}
+		}
+	}
+}
+
+sub check_unused_sequence_persistence { 
+	my $domain_fn = $_[0];
+	my $write = $_[1];
+
+	my $domain_xml_doc = xml_open($domain_fn);
+	my $domain_root_node = find_domain_root_node($domain_xml_doc);	
+	if (!$domain_root_node) { return 0 } 
+	
+
+	my $pdb_id 		= get_pdb_id($domain_root_node);
+	my $chain_id 	= get_chain_id($domain_root_node);
+
+	my ($seqid_aref, $struct_seqid_aref, $pdbnum_href, $asym_id) = pdbml_seq_parse($pdb_id, $chain_id);
+
+	my $struct_seqid_range = rangify(@$struct_seqid_aref);
+	my $query_seqid_range = ungap_range($struct_seqid_range, $GAP_TOL);
+	my $query_seqid_aref = range_expand($query_seqid_range);
+
+	foreach my $domain_node (find_domain_nodes($domain_xml_doc)) { 
+
+		my $domain_id = get_domain_id($domain_node);
+		if ($domain_node->exists('optimized_seqid_range')) { 
+			my $optimized_seqid_range = get_optimized_seqid_range($domain_node);
+			my $optimized_seqid_aref = range_expand($optimized_seqid_range);
+			range_exclude($optimized_seqid_aref, $query_seqid_aref);
+		}else{
+			my $ungapped_seqid_range = get_ungapped_seqid_range($domain_node);
+			my $ungapped_seqid_aref = range_expand($ungapped_seqid_range);
+			range_exclude($ungapped_seqid_aref, $query_seqid_aref);
+		}
+	}
+
+	
+	if (scalar @$query_seqid_aref > 0 ) { 
+		my $final_range = rangify(@$query_seqid_aref);
+		return 0 if $final_range eq '0';
+		my @fsegs = split(/,/, $final_range);
+		my $max_seg = 0;
+		foreach my $s (@fsegs) { 
+			$s =~ /(\d+)\-(\d+)/;
+			my $seg_len = $2 - $1;
+			$seg_len > $max_seg and $max_seg = $seg_len;
+		}
+		my $total = scalar(@$query_seqid_aref) - 1;
+		if ($write) { 
+			if ($domain_root_node->exists('unused_persistence')) { 
+				$domain_root_node->findnodes('unused_persistence')->get_node(1)->unbindNode;
+			}
+			my $persistence_node = $domain_xml_doc->createElement('unused_persistence');
+			$persistence_node->setAttribute('max_seg', $max_seg);
+			$persistence_node->setAttribute('total', $total);
+			$domain_root_node->appendChild($persistence_node);
+		}
+		if ($max_seg != $total && $max_seg < $GAP_TOL) { 
+			print "$pdb_id/$chain_id: $query_seqid_range => $final_range ($max_seg/$total)\n";
+		}
+	}else{
+		if ($write) { 
+			if ($domain_root_node->exists('unused_persistence')) { 
+				$domain_root_node->findnodes('unused_persistence')->get_node(1)->unbindNode;
+			}
+			my $persistence_node = $domain_xml_doc->createElement('unused_persistence');
+			$persistence_node->setAttribute('max_seg', 0);
+			$persistence_node->setAttribute('total', 0);
+			$domain_root_node->appendChild($persistence_node);
+		}
+	}
+
+	if ($write) { 
+		xml_write($domain_xml_doc, $domain_fn);
+	}
+
+
+
 }
 
 sub range_decompose {
